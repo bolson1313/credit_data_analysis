@@ -48,7 +48,7 @@ if __name__ == '__main__':
 
     if wait_for_streamlit():
         try:
-            webview.create_window("Moja aplikacja", "http://localhost:8501", width=1024, height=768)
+            webview.create_window("Analiza danych kredytowych", "http://localhost:8501", width=1024, height=768)
             webview.start()
         finally:
             # Zakończenie procesu Streamlit po zamknięciu okna
