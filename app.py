@@ -6,7 +6,11 @@ import seaborn as sns
 import os
 import io
 import plotly.express as px
+import plotly.graph_objects as go
+import plotly.figure_factory as ff
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 # Import modułów aplikacji
 from modules.data_loader import (
@@ -98,6 +102,193 @@ def safe_display_dataframe(df, column_config=None, use_display_names=True):
         st.write("Dane w formie tekstowej:")
         st.write(df.to_string())
 
+# Dodaj nowe funkcje na początku pliku, po importach
+def display_missing_values(data):
+    """Wyświetla szczegółowe informacje o brakujących wartościach"""
+    missing_rows = data[data.isna().any(axis=1)]
+    
+    if missing_rows.empty:
+        st.info("Brak wierszy z brakującymi wartościami.")
+        return
+        
+    missing_cols = data.columns[data.isna().any()].tolist()
+    
+    st.write(f"Znaleziono {len(missing_rows)} wierszy z brakującymi wartościami w {len(missing_cols)} kolumnach.")
+    
+    # Podsumowanie brakujących wartości
+    missing_summary = pd.DataFrame({
+        'Kolumna': missing_cols,
+        'Liczba brakujących': [data[col].isna().sum() for col in missing_cols],
+        'Procent brakujących': [f"{(data[col].isna().sum() / len(data) * 100):.2f}%" for col in missing_cols]
+    })
+    
+    st.write("Podsumowanie brakujących wartości per kolumna:")
+    safe_display_dataframe(missing_summary, use_display_names=False)
+    
+    # Szczegóły brakujących wartości w wierszach
+    st.write("\nSzczegóły wierszy z brakującymi wartościami:")
+    
+    # Zamiast zagnieżdżonych expanderów, używamy tabelki z wszystkimi informacjami
+    missing_details = []
+    for idx, row in missing_rows.iterrows():
+        missing_in_row = row[row.isna()].index.tolist()
+        for col in missing_in_row:
+            missing_details.append({
+                'Indeks wiersza': idx,
+                'Kolumna': col,
+                'Wartość': 'Brak'
+            })
+    
+    if missing_details:
+        details_df = pd.DataFrame(missing_details)
+        st.dataframe(
+            details_df,
+            column_config={
+                "Indeks wiersza": st.column_config.NumberColumn(width="small"),
+                "Kolumna": st.column_config.TextColumn(width="medium"),
+                "Wartość": st.column_config.TextColumn(width="small")
+            }
+        )
+
+def create_editable_dataframe(data, start_idx, end_idx):
+    """Tworzy edytowalny dataframe z zachowaniem oryginalnych indeksów"""
+    display_data = data.iloc[start_idx:end_idx].copy()
+    
+    # Sprawdź czy kolumna 'ID' już istnieje i usuń ją jeśli tak
+    if 'ID' in display_data.columns:
+        display_data = display_data.drop(columns=['ID'])
+    
+    # Dodaj kolumnę z indeksami na początku, zaczynając od 0
+    display_data.insert(0, 'ID', display_data.index)
+    
+    # Mapuj nazwy kolumn na przyjazne nazwy (oprócz kolumny indeksu)
+    display_names = ['ID']
+    for col in data.columns:
+        if col != 'ID':  # Nie mapuj kolumny indeksu ponownie
+            display_names.append(get_display_column_name(col))
+    
+    display_data.columns = display_names
+    
+    # Konfiguracja kolumn
+    column_config = {
+        'ID': st.column_config.NumberColumn(
+            width='small',
+            help='Identyfikator wiersza (od 0)',
+            disabled=True
+        )
+    }
+    
+    # Dodaj konfigurację dla pozostałych kolumn
+    column_config.update({
+        col: st.column_config.Column(
+            label=col,
+            width="medium",
+            required=True
+        ) for col in display_names[1:]  # Pomijamy kolumnę ID
+    })
+    
+    # Wyświetl edytowalną tabelę
+    edited_df = st.data_editor(
+        display_data,
+        column_config=column_config,
+        num_rows="dynamic",
+        key=f"editor_{start_idx}_{end_idx}"
+    )
+    
+    if not edited_df.equals(display_data):
+        # Usuń kolumnę ID przed zapisem zmian
+        edited_df = edited_df.drop(columns=['ID'])
+        # Przywróć oryginalne nazwy kolumn
+        edited_df.columns = data.columns
+        
+        # Zapisz zmiany w oryginalnych danych
+        original_indices = data.iloc[start_idx:end_idx].index
+        st.session_state.data.loc[original_indices] = edited_df
+        st.success("Zmiany zostały zapisane!")
+    
+    return edited_df
+
+def safe_paginated_display(data, rows_per_page, current_page):
+    """Bezpieczne wyświetlanie danych z paginacją"""
+    try:
+        total_rows = len(data)
+        start_idx = (current_page - 1) * rows_per_page
+        end_idx = min(start_idx + rows_per_page, total_rows)
+        
+        create_editable_dataframe(data, start_idx, end_idx)
+        
+    except Exception as e:
+        st.error(f"Błąd wyświetlania danych: {str(e)}")
+        st.write("Spróbuj zmniejszyć liczbę wyświetlanych wierszy")
+
+# Add after imports, before main code
+
+def plot_parallel_coordinates(data, labels, features):
+    """Tworzy wykres współrzędnych równoległych dla klastrów"""
+    df_plot = pd.DataFrame(data, columns=features).copy()
+    df_plot['Klaster'] = labels
+    
+    # Tworzenie wykresu
+    fig = go.Figure(data=
+        go.Parcoords(
+            line=dict(
+                color=df_plot['Klaster'].astype('category').cat.codes,  # Convert to numeric codes
+                colorscale='Viridis'
+            ),
+            dimensions=[dict(
+                range=[df_plot[feat].min(), df_plot[feat].max()],
+                label=feat,
+                values=df_plot[feat]
+            ) for feat in features]
+        )
+    )
+    
+    # Dostosowanie layoutu
+    fig.update_layout(
+        title="Charakterystyka klastrów - wykres równoległych współrzędnych",
+        plot_bgcolor='white',
+        paper_bgcolor='white'
+    )
+    
+    return fig
+
+def plot_3d_scatter(data, labels, features):
+    """Tworzy trójwymiarowy wykres rozrzutu"""
+    if len(features) >= 3:
+        df_plot = pd.DataFrame({
+            'x': data[features[0]],
+            'y': data[features[1]],
+            'z': data[features[2]],
+            'Klaster': [f'Klaster {l}' for l in labels]
+        })
+        
+        fig = px.scatter_3d(
+            df_plot, 
+            x='x', y='y', z='z',
+            color='Klaster',
+            labels={'x': features[0], 'y': features[1], 'z': features[2]},
+            title="Wizualizacja klastrów 3D"
+        )
+        
+        return fig
+    return None
+
+def plot_cluster_density(data, labels, feature):
+    """Tworzy wykres gęstości dla wybranej cechy w klastrach"""
+    df_plot = pd.DataFrame({
+        'Wartość': data[feature],
+        'Klaster': [f'Klaster {l}' for l in labels]
+    })
+    
+    fig = px.violin(
+        df_plot,
+        x='Klaster',
+        y='Wartość',
+        box=True,
+        title=f'Rozkład gęstości dla cechy {feature}'
+    )
+    return fig
+
 # Ustawienia strony
 st.set_page_config(
     page_title="Analiza zbioru Credit Approval",
@@ -119,7 +310,18 @@ def get_data():
 if 'data' not in st.session_state:
     st.session_state.data = None
     st.session_state.file_name = None
-    st.session_state.page = 1  
+    st.session_state.page = 1
+
+if 'clustering_state' not in st.session_state:
+    st.session_state.clustering_state = {
+        'viz_cols_2d': None,
+        'viz_cols_3d': None,
+        'show_visualizations': False,
+        'metrics': None,
+        'X_scaled': None,
+        'X_original': None,
+        'model': None
+    }
 
 # Tytuł aplikacji
 st.title("Analiza zbioru Credit Approval")
@@ -147,7 +349,7 @@ with st.sidebar:
             else:
                 st.error("Błąd wczytywania pliku.")
     else:
-        if st.button("Wczytaj przykładowy zbiór Credit Approval"):
+        if st.button("Wczytaj przykładowy zbioru Credit Approval"):
             with st.spinner("Wczytywanie przykładowych danych..."):
                 data = load_sample_data()
                 if data is not None:
@@ -200,6 +402,43 @@ if st.session_state.data is not None:
     # Wyświetlenie wszystkich danych z paginacją
     st.subheader("Podgląd danych")
     
+    # Dodaj opcję filtrowania wierszy
+    filter_rows = st.checkbox("Filtruj wiersze po indeksach")
+    if filter_rows:
+        indices_help = """
+        Wprowadź indeksy wierszy w jednym z formatów:
+        - Pojedyncze liczby: "1,3,5"
+        - Zakresy: "1-5"
+        - Kombinacje: "1,3-5,7,10-12"
+        """
+        indices_str = st.text_input("Indeksy wierszy:", help=indices_help)
+        
+        if indices_str:
+            try:
+                # Parsowanie indeksów
+                indices = set()
+                for part in indices_str.split(','):
+                    if '-' in part:
+                        start, end = map(int, part.split('-'))
+                        indices.update(range(start, end + 1))
+                    else:
+                        indices.add(int(part))
+                
+                # Filtrowanie danych
+                filtered_data = data.loc[sorted(indices)]
+                total_rows = len(filtered_data)
+                data_to_display = filtered_data
+            except Exception as e:
+                st.error(f"Błąd w formacie indeksów: {str(e)}")
+                data_to_display = data
+                total_rows = len(data)
+        else:
+            data_to_display = data
+            total_rows = len(data)
+    else:
+        data_to_display = data
+        total_rows = len(data)
+
     # Kontrolka do wyboru liczby wierszy na stronie
     rows_per_page = st.selectbox(
         "Liczba wierszy na stronie",
@@ -208,7 +447,6 @@ if st.session_state.data is not None:
     )
     
     # Obliczenie całkowitej liczby stron
-    total_rows = len(data)
     if rows_per_page == "Wszystkie":
         rows_per_page = total_rows
     else:
@@ -239,8 +477,67 @@ if st.session_state.data is not None:
     # Wyświetlenie informacji o zakresie
     st.write(f"Wyświetlanie wierszy {start_idx + 1}-{end_idx} z {total_rows}")
     
+    # Modyfikacja funkcji create_editable_dataframe aby pokazywała indeksy
+    def create_editable_dataframe(data, start_idx, end_idx):
+        """Tworzy edytowalny dataframe z zachowaniem oryginalnych indeksów"""
+        display_data = data.iloc[start_idx:end_idx].copy()
+        
+        # Sprawdź czy kolumna 'ID' już istnieje i usuń ją jeśli tak
+        if 'ID' in display_data.columns:
+            display_data = display_data.drop(columns=['ID'])
+        
+        # Dodaj kolumnę z indeksami na początku, zaczynając od 0
+        display_data.insert(0, 'ID', display_data.index)
+        
+        # Mapuj nazwy kolumn na przyjazne nazwy (oprócz kolumny indeksu)
+        display_names = ['ID']
+        for col in data.columns:
+            if col != 'ID':  # Nie mapuj kolumny indeksu ponownie
+                display_names.append(get_display_column_name(col))
+        
+        display_data.columns = display_names
+        
+        # Konfiguracja kolumn
+        column_config = {
+            'ID': st.column_config.NumberColumn(
+                width='small',
+                help='Identyfikator wiersza (od 0)',
+                disabled=True
+            )
+        }
+        
+        # Dodaj konfigurację dla pozostałych kolumn
+        column_config.update({
+            col: st.column_config.Column(
+                label=col,
+                width="medium",
+                required=True
+            ) for col in display_names[1:]  # Pomijamy kolumnę ID
+        })
+        
+        # Wyświetl edytowalną tabelę
+        edited_df = st.data_editor(
+            display_data,
+            column_config=column_config,
+            num_rows="dynamic",
+            key=f"editor_{start_idx}_{end_idx}"
+        )
+        
+        if not edited_df.equals(display_data):
+            # Usuń kolumnę ID przed zapisem zmian
+            edited_df = edited_df.drop(columns=['ID'])
+            # Przywróć oryginalne nazwy kolumn
+            edited_df.columns = data.columns
+            
+            # Zapisz zmiany w oryginalnych danych
+            original_indices = data.iloc[start_idx:end_idx].index
+            st.session_state.data.loc[original_indices] = edited_df
+            st.success("Zmiany zostały zapisane!")
+        
+        return edited_df
+
     # Wyświetlenie danych
-    safe_display_dataframe(data.iloc[start_idx:end_idx])
+    safe_paginated_display(data_to_display, rows_per_page, st.session_state.page)
 
     # Dodanie przycisków nawigacji
     if total_pages > 1:
@@ -277,6 +574,10 @@ if st.session_state.data is not None:
     # Zakładka 1: Statystyki
     with tab1:
         st.header("Analiza statystyczna")
+        
+        # Dodaj na początku zakładki:
+        st.subheader("Brakujące wartości")
+        display_missing_values(data)
 
         st.subheader("Statystyki dla kolumn numerycznych")
         num_stats = calculate_numerical_stats(data)
@@ -780,6 +1081,11 @@ if st.session_state.data is not None:
     # Zakładka 4: Modelowanie
     with tab4:
         st.header("Grupowanie danych")
+        st.write("""
+        ### K-means Clustering
+        K-means to algorytm grupowania, który dzieli dane na k grup (klastrów) na podstawie podobieństwa cech.
+        Każdy klaster jest reprezentowany przez swój centroid (średni punkt).
+        """)
         
         # Wybór kolumn do grupowania
         st.subheader("Wybór danych")
@@ -791,77 +1097,186 @@ if st.session_state.data is not None:
         )
 
         # Parametry grupowania
-        st.subheader("Parametry grupowania")
-        n_clusters = st.slider(
-            "Liczba klastrów (k)", 
-            min_value=2, 
-            max_value=10, 
-            value=3
-        )
+        with st.expander("Parametry grupowania"):
+            col1, col2 = st.columns(2)
+            with col1:
+                n_clusters = st.slider(
+                    "Liczba klastrów (k)", 
+                    min_value=2, 
+                    max_value=10, 
+                    value=3
+                )
+                init = st.selectbox(
+                    "Metoda inicjalizacji",
+                    options=['k-means++', 'random'],
+                    index=0
+                )
+                max_iter = st.number_input(
+                    "Maksymalna liczba iteracji",
+                    min_value=100,
+                    max_value=1000,
+                    value=300,
+                    step=50
+                )
+            
+            with col2:
+                n_init = st.number_input(
+                    "Liczba inicjalizacji",
+                    min_value=1,
+                    max_value=20,
+                    value=10,
+                    step=1
+                )
+                random_state = st.number_input(
+                    "Ziarno losowości",
+                    value=42
+                )
 
         # Przycisk do uruchomienia grupowania
         if st.button("Wykonaj grupowanie"):
             with st.spinner("Grupowanie danych..."):
-                # Przygotowanie danych
-                X_scaled, X_original = prepare_data_for_clustering(data, clustering_cols)
+                    X_scaled, X_original = prepare_data_for_clustering(data, clustering_cols)
 
-                if X_scaled is None:
-                    st.error("Błąd przygotowania danych. Sprawdź, czy wybrane kolumny są odpowiednie.")
-                else:
-                    try:
-                        # Trenowanie modelu
-                        model = train_kmeans_model(X_scaled, n_clusters)
-
-                        # Ewaluacja
+                    if X_scaled is None:
+                        st.error("Błąd przygotowania danych. Sprawdź, czy wybrane kolumny są odpowiednie.")
+                    else:
+                        model = KMeans(
+                            n_clusters=n_clusters,
+                            init=init,
+                            max_iter=max_iter,
+                            n_init=n_init,
+                            random_state=random_state
+                        )
+                        model.fit(X_scaled)
+                        
                         metrics = evaluate_clustering(X_scaled, model)
-
+                        
                         if metrics is not None:
                             st.success("Grupowanie zakończone pomyślnie!")
-
-                            # Wyświetl metryki
-                            st.subheader("Metryki grupowania")
-                            st.write(f"Inertia (suma kwadratów odległości): {metrics['inertia']:.2f}")
-                            st.write(f"Współczynnik sylwetki: {metrics['silhouette']:.3f}")
-
+                            
+                            # Metryki
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Inertia", f"{metrics['inertia']:.2f}")
+                            with col2:
+                                st.metric("Współczynnik sylwetki", f"{metrics['silhouette']:.3f}")
+                            
                             # Rozmiary klastrów
                             st.subheader("Rozmiary klastrów")
                             sizes_df = pd.DataFrame.from_dict(
                                 metrics['cluster_sizes'], 
-                                orient='index', 
+                                orient='index',
                                 columns=['Liczba próbek']
                             )
                             safe_display_dataframe(sizes_df)
-
-                            # Wizualizacja 2D (jeśli wybrano co najmniej 2 kolumny)
-                            if len(X_scaled.columns) >= 2:
-                                st.subheader("Wizualizacja klastrów")
-                                
-                                # Wybór cech do wizualizacji
-                                viz_cols = st.multiselect(
-                                    "Wybierz 2 cechy do wizualizacji",
-                                    options=X_scaled.columns,
-                                    default=list(X_scaled.columns[:2])
+                            
+                            # Centroidy
+                            st.subheader("Centroidy klastrów")
+                            with st.expander("Pokaż współrzędne centroidów"):
+                                centroids_df = pd.DataFrame(
+                                    metrics['centroids'],
+                                    columns=X_scaled.columns,
+                                    index=[f"Klaster {i}" for i in range(n_clusters)]
                                 )
+                                safe_display_dataframe(centroids_df)
+                            
 
-                                if len(viz_cols) == 2:
-                                    fig = plot_clusters_2d(
-                                        X_scaled, 
-                                        metrics['labels'],
-                                        metrics['centroids'],
-                                        features=viz_cols
+                            # Wizualizacje
+                            st.subheader("Wizualizacje")
+                            
+                            # Wykres elbow method
+                            st.write("#### Wykres łokcia (elbow method)")
+                            st.write("""
+                            Ten wykres pomaga w wyborze optymalnej liczby klastrów. 
+                            Punkt 'zgięcia' (łokcia) sugeruje optymalną liczbę klastrów.
+                            """)
+
+                            # Obliczenia dla wykresu łokcia
+                            k_range = range(2, min(11, len(X_scaled)))
+                            inertias = []
+                            with st.spinner("Obliczanie wykresu łokcia..."):
+                                for k in k_range:
+                                    kmeans = KMeans(n_clusters=k, random_state=42)
+                                    kmeans.fit(X_scaled)
+                                    inertias.append(kmeans.inertia_)
+
+                            # Wyświetl wykres łokcia
+                            fig_elbow = px.line(
+                                x=list(k_range), 
+                                y=inertias,
+                                title="Metoda łokcia dla wyboru optymalnej liczby klastrów",
+                                labels={'x': 'Liczba klastrów (k)', 'y': 'Inertia'}
+                            )
+                            fig_elbow.add_scatter(
+                                x=[n_clusters], 
+                                y=[model.inertia_], 
+                                mode='markers',
+                                marker=dict(size=10, color='red'),
+                                name='Wybrana liczba klastrów'
+                            )
+                            st.plotly_chart(fig_elbow, use_container_width=True, key="elbow_plot_main")
+
+                            # Wizualizacja klastrów 2D
+                            if len(X_scaled.columns) >= 2:
+                                st.write("#### Wizualizacja klastrów 2D")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    feat1 = st.selectbox(
+                                        "Wybierz pierwszą cechę",
+                                        options=X_scaled.columns,
+                                        index=0,
+                                        key='feat1_2d_select_main'
                                     )
-                                    st.plotly_chart(fig, use_container_width=True, key="clusters_plot")
-                                else:
-                                    st.warning("Wybierz dokładnie 2 cechy do wizualizacji.")
+                                
+                                with col2:
+                                    remaining_cols = [col for col in X_scaled.columns if col != feat1]
+                                    feat2 = st.selectbox(
+                                        "Wybierz drugą cechę",
+                                        options=remaining_cols,
+                                        index=0,
+                                        key='feat2_2d_select_main'
+                                    )
+                                
+                                # Generowanie wykresu
+                                fig = plot_clusters_2d(X_scaled, metrics['labels'], metrics['centroids'], [feat1, feat2])
+                                st.plotly_chart(fig, use_container_width=True, key="clustering_2d_plot_main")
 
-                            # Dodaj etykiety klastrów do oryginalnych danych
-                            clustered_data = X_original.copy()
-                            clustered_data['Klaster'] = metrics['labels']
-                            st.subheader("Dane z przypisanymi klastrami")
-                            safe_display_dataframe(clustered_data)
+                            # Wykres równoległych współrzędnych
+                            st.write("#### Wykres równoległych współrzędnych")
+                            st.write("""
+                            Ten wykres pokazuje charakterystykę klastrów na wszystkich wymiarach jednocześnie.
+                            Każda linia reprezentuje jeden klaster, a jej przebieg pokazuje wartości na poszczególnych osiach.
+                            """)
+                            fig_parallel = plot_parallel_coordinates(X_scaled, metrics['labels'], X_scaled.columns)
+                            st.plotly_chart(fig_parallel, use_container_width=True, key="parallel_coords_plot_main")
 
-                    except Exception as e:
-                        st.error(f"Wystąpił błąd podczas grupowania: {str(e)}")
-else:
-    st.info("Wczytaj dane, aby rozpocząć analizę.")
-    st.write("Wybierz opcję wczytywania danych w panelu bocznym.")
+                            # Wizualizacja 3D
+                            if len(X_scaled.columns) >= 3:
+                                st.write("#### Wizualizacja 3D")
+                                st.write("""
+                                Ten wykres pokazuje rozmieszczenie punktów w przestrzeni trójwymiarowej.
+                                Możesz obracać wykres i oglądać klastry z różnych perspektyw.
+                                """)
+                                
+                                viz_cols_3d = st.multiselect(
+                                    "Wybierz 3 cechy do wizualizacji 3D",
+                                    options=X_scaled.columns,
+                                    default=list(X_scaled.columns[:3]),
+                                    key="viz_3d_main"
+                                )
+                                
+                                if len(viz_cols_3d) == 3:
+                                    fig_3d = plot_3d_scatter(X_scaled, metrics['labels'], viz_cols_3d)
+                                    st.plotly_chart(fig_3d, use_container_width=True, key="scatter_3d_plot_main")
+
+                            # Wykresy gęstości
+                            st.write("#### Rozkłady gęstości cech w klastrach")
+                            st.write("""
+                            Te wykresy pokazują rozkład wartości cech w poszczególnych klastrach.
+                            Szerokość wykresu odpowiada częstości występowania danej wartości.
+                            """)
+
+                            for i, feature in enumerate(X_scaled.columns):
+                                fig_density = plot_cluster_density(X_scaled, metrics['labels'], feature)
+                                st.plotly_chart(fig_density, use_container_width=True, key=f"density_plot_main_{feature}_{i}")
