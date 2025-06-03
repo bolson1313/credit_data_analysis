@@ -4,3 +4,4 @@
 /.venv/
 /dist/
 /.idea/
+/modules/__pycache__/
