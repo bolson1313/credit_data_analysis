@@ -246,47 +246,50 @@ def scale_data(data, columns, method='minmax'):
 
 
 def encode_categorical(data, columns, method='onehot'):
-    """Koduje kolumny kategoryczne."""
+    """Koduje kolumny kategoryczne metodą onehot lub binary."""
     if data is None or not columns:
         return data
 
     try:
-        # Tworzenie kopii danych
         result = data.copy()
+        valid_columns = [col for col in columns if col in result.columns]
 
-        # Sprawdzenie, czy kolumny istnieją
-        valid_columns = [col for col in columns if col in data.columns]
-        
         if not valid_columns:
+            print("Brak poprawnych kolumn do zakodowania.")
             return result
 
         if method == 'onehot':
-            # Kodowanie one-hot
-            result = pd.get_dummies(result, columns=valid_columns, drop_first=False)
+            # Konwersja na string przed kodowaniem
+            for col in valid_columns:
+                result[col] = result[col].astype(str)
+            result = pd.get_dummies(result, columns=valid_columns, drop_first=False, dtype=float)
+
         elif method == 'binary':
-            # Kodowanie binarne
-            encoder = BinaryEncoder(cols=valid_columns)
-            encoded = encoder.fit_transform(result)
-            # Usunięcie oryginalnych kolumn i zastąpienie zakodowanymi
+            for col in valid_columns:
+                result[col] = result[col].astype(str)
+            encoder = BinaryEncoder(cols=valid_columns, return_df=True)
+            encoded = encoder.fit_transform(result[valid_columns])
+
+            # Usuń tylko zakodowane kolumny, nie wszystkie
             result = result.drop(columns=valid_columns)
-            result = pd.concat([result, encoded], axis=1)
+            encoded = encoded.astype(float)
+
+            # Połącz zakodowane dane z resztą
+            result = pd.concat([result.reset_index(drop=True), encoded.reset_index(drop=True)], axis=1)
+
+        else:
+            print(f"Nieobsługiwana metoda kodowania: {method}")
 
         return result
-        
+
     except Exception as e:
-        print(f"Błąd podczas kodowania danych: {str(e)}")
+        print(f"Błąd podczas kodowania danych ({method}): {str(e)}")
         return data
 
 
+
 def select_rows(data, indices_str, mode='keep'):
-    """
-    Wybiera lub usuwa wiersze według indeksów.
-    
-    Args:
-        data: DataFrame z danymi
-        indices_str: String z indeksami (np. "1,3-5,7")
-        mode: 'keep' aby zachować wybrane wiersze, 'remove' aby je usunąć
-    """
+    """Wybiera lub usuwa wiersze według indeksów."""
     if data is None or not indices_str:
         print("Nie podano indeksów")
         return data
@@ -302,23 +305,21 @@ def select_rows(data, indices_str, mode='keep'):
         
         for part in parts:
             if '-' in part:
-                # Obsługa zakresu (np. "5-10")
                 try:
                     start, end = map(int, part.split('-'))
                     if start <= end:
                         indices_set.update(range(start, end + 1))
-                        print(f"Dodano zakres {start}-{end}")
+                        print(f"Dodano zakres {start}-{end} (włącznie)")
                     else:
                         print(f"Nieprawidłowy zakres (start > end): {part}")
                 except ValueError:
                     print(f"Pominięto nieprawidłowy zakres: {part}")
                     continue
             else:
-                # Obsługa pojedynczej liczby
                 try:
                     idx = int(part)
                     indices_set.add(idx)
-                    print(f"Dodano indeks: {idx}")
+                    print(f"Dodano indeks: {part}")
                 except ValueError:
                     print(f"Pominięto nieprawidłową wartość: {part}")
                     continue
@@ -330,17 +331,24 @@ def select_rows(data, indices_str, mode='keep'):
             print("Brak prawidłowych indeksów")
             return data
         
-        # Tworzenie kopii danych
-        result = data.copy()
+        # Zachowaj kopię danych przed zmianami
+        affected_data = data.iloc[valid_indices].copy()
         
+        # Tworzenie kopii danych bez resetowania indeksów
         if mode == 'keep':
-            # Zachowaj tylko wybrane wiersze
-            result = result.iloc[valid_indices].reset_index(drop=True)
-            print(f"\nZachowano {len(valid_indices)} wierszy")
+            result = data.iloc[valid_indices]
+            operation = "zachowano"
         else:
-            # Usuń wybrane wiersze
-            result = result.drop(index=result.index[valid_indices]).reset_index(drop=True)
-            print(f"\nUsunięto {len(valid_indices)} wierszy")
+            result = data.drop(data.index[valid_indices])
+            operation = "usunięto"
+        
+        # Wyświetl szczegółowe informacje o operacji
+        print(f"\nOperacja: {operation} wiersze")
+        print(f"Liczba przetworzonych wierszy: {len(valid_indices)}")
+        print("\nPrzetworzone wiersze:")
+        print(f"Indeksy: {valid_indices}")
+        print("\nWartości przed zmianą:")
+        print(affected_data)
         
         return result
         
@@ -378,3 +386,30 @@ def replace_values_in_columns(data, replacements):
     except Exception as e:
         print(f"Błąd podczas zamiany wartości: {str(e)}")
         return data
+
+
+def log_data_changes(original_data, modified_data, operation_type, details=None):
+    """Loguje zmiany w danych."""
+    changes = {
+        'operation_type': operation_type,
+        'original_rows': len(original_data),
+        'modified_rows': len(modified_data),
+        'difference': len(original_data) - len(modified_data),
+        'timestamp': pd.Timestamp.now(),
+        'details': details or {}
+    }
+    
+    # Jeśli są różnice w liczbie wierszy
+    if changes['difference'] != 0:
+        if changes['difference'] > 0:
+            print(f"Usunięto {changes['difference']} wierszy")
+        else:
+            print(f"Dodano {abs(changes['difference'])} wierszy")
+    
+    # Jeśli są szczegóły operacji
+    if details:
+        print("\nSzczegóły operacji:")
+        for key, value in details.items():
+            print(f"- {key}: {value}")
+    
+    return changes
