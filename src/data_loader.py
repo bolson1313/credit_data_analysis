@@ -5,48 +5,254 @@ import streamlit as st
 def load_csv(file):
     """Wczytuje dane z pliku CSV."""
     try:
-        data = pd.read_csv(file, na_values='?')
+        # Reset file pointer
+        file.seek(0)
         
-        # Sprawdź czy kolumny są już w formacie A1, A2, itd.
-        expected_columns = [f'A{i}' for i in range(1, 17)]
+        # Spróbuj różnych kodowań
+        encodings = ['utf-8', 'latin-1', 'cp1250', 'iso-8859-1']
+        data = None
         
-        if data.shape[1] == 16 and not all(col in data.columns for col in expected_columns):
-            # Jeśli mamy 16 kolumn, ale nie są nazwane A1-A16, zmień ich nazwy
-            data.columns = [f'A{i}' for i in range(1, 17)]
-            
+        for encoding in encodings:
+            try:
+                file.seek(0)
+                data = pd.read_csv(file, encoding=encoding, na_values=['?', 'NA', 'na', 'N/A', 'n/a', '', ' ', 'null', 'NULL'])
+                st.success(f"✅ Plik wczytany pomyślnie (kodowanie: {encoding})")
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                st.warning(f"Próba z kodowaniem {encoding} nie powiodła się: {str(e)}")
+                continue
+        
+        if data is None:
+            st.error("❌ Nie udało się wczytać pliku z żadnym z obsługiwanych kodowań")
+            return None
+        
+        # Podstawowe czyszczenie danych
+        data = clean_data(data)
+        
+        if data is None or data.empty:
+            st.error("❌ Plik jest pusty lub zawiera tylko nieprawidłowe dane")
+            return None
+        
+        # Informacje o wczytanych danych
+        st.info(f"📊 Wczytano: {data.shape[0]} wierszy × {data.shape[1]} kolumn")
+        
+        # Sprawdź jakość danych
+        missing_percent = (data.isnull().sum().sum() / (data.shape[0] * data.shape[1])) * 100
+        if missing_percent > 0:
+            st.warning(f"⚠️ Brakujące wartości: {missing_percent:.1f}% wszystkich komórek")
+        
+        duplicates = data.duplicated().sum()
+        if duplicates > 0:
+            st.warning(f"⚠️ Znaleziono {duplicates} zduplikowanych wierszy")
+        
         return data
+        
     except Exception as e:
-        st.error(f"Błąd wczytywania pliku: {e}")
+        st.error(f"❌ Błąd wczytywania pliku: {str(e)}")
         return None
 
-def load_sample_data():
-    """Wczytuje przykładowy zbiór Credit Approval."""
+def clean_data(data):
+    """Czyści wczytane dane."""
     try:
-        url = "https://archive.ics.uci.edu/ml/machine-learning-databases/credit-screening/crx.data"
-        data = pd.read_csv(url, header=None, na_values='?')
-        # Ustawienie nazw kolumn zgodnie z opisem zbioru danych
-        data.columns = ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8',
-                        'A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15', 'A16']
-        return data
+        if data is None:
+            return None
+        
+        # Skopiuj dane
+        cleaned = data.copy()
+        
+        # Usuń całkowicie puste wiersze i kolumny
+        cleaned = cleaned.dropna(how='all').reset_index(drop=True)
+        cleaned = cleaned.dropna(axis=1, how='all')
+        
+        # Zastąp różne reprezentacje brakujących wartości
+        missing_representations = ['?', 'NA', 'na', 'N/A', 'n/a', '', ' ', 'null', 'NULL', 'None', 'NONE']
+        for col in cleaned.columns:
+            for missing_val in missing_representations:
+                cleaned[col] = cleaned[col].replace(missing_val, np.nan)
+        
+        # Usuń kolumny, które są w całości puste po czyszczeniu
+        cleaned = cleaned.dropna(axis=1, how='all')
+        
+        # Sprawdź czy zostały jakieś dane
+        if cleaned.empty:
+            return None
+        
+        return cleaned
+        
     except Exception as e:
-        st.error(f"Błąd wczytywania przykładowych danych: {e}")
-        return None
+        st.error(f"❌ Błąd podczas czyszczenia danych: {str(e)}")
+        return data
 
 def get_dataset_info(data):
     """Zwraca podstawowe informacje o zbiorze danych."""
     if data is None:
         return None
 
+    # Analiza typów danych
+    numeric_cols = data.select_dtypes(include=['number']).columns.tolist()
+    categorical_cols = data.select_dtypes(include=['object', 'category']).columns.tolist()
+    
     info = {
         "rows": data.shape[0],
         "columns": data.shape[1],
         "columns_names": data.columns.tolist(),
+        "numeric_columns": numeric_cols,
+        "categorical_columns": categorical_cols,
         "missing_values": data.isna().sum().sum(),
         "duplicated_rows": data.duplicated().sum(),
-        "dtypes": data.dtypes
+        "dtypes": data.dtypes,
+        "memory_usage": data.memory_usage(deep=True).sum() / 1024**2  # MB
     }
 
     return info
+
+def detect_column_types(data):
+    """Automatycznie wykrywa i sugeruje typy kolumn."""
+    if data is None:
+        return {}
+    
+    suggestions = {}
+    
+    for col in data.columns:
+        # Sprawdź czy kolumna wygląda na numeryczną
+        try:
+            pd.to_numeric(data[col], errors='raise')
+            suggestions[col] = 'numeric'
+            continue
+        except:
+            pass
+        
+        # Sprawdź czy kolumna wygląda na datę
+        try:
+            pd.to_datetime(data[col], errors='raise')
+            suggestions[col] = 'datetime'
+            continue
+        except:
+            pass
+        
+        # Sprawdź czy kolumna wygląda na boolean
+        unique_vals = data[col].dropna().astype(str).str.lower().unique()
+        if len(unique_vals) <= 2 and all(val in ['true', 'false', 't', 'f', 'yes', 'no', 'y', 'n', '1', '0', '+', '-'] for val in unique_vals):
+            suggestions[col] = 'boolean'
+            continue
+        
+        # Sprawdź czy kolumna ma małą liczbę unikalnych wartości (kategorie)
+        unique_count = data[col].nunique()
+        total_count = len(data[col].dropna())
+        if unique_count / total_count < 0.05 or unique_count < 10:
+            suggestions[col] = 'categorical'
+        else:
+            suggestions[col] = 'text'
+    
+    return suggestions
+
+def suggest_data_preprocessing(data):
+    """Sugeruje operacje preprocessing na podstawie analizy danych."""
+    if data is None:
+        return []
+    
+    suggestions = []
+    
+    # Sprawdź brakujące wartości
+    missing_data = data.isnull().sum()
+    total_missing = missing_data.sum()
+    
+    if total_missing > 0:
+        high_missing_cols = missing_data[missing_data > len(data) * 0.5].index.tolist()
+        if high_missing_cols:
+            suggestions.append(f"Rozważ usunięcie kolumn z więcej niż 50% brakujących wartości: {high_missing_cols}")
+        
+        medium_missing_cols = missing_data[(missing_data > 0) & (missing_data <= len(data) * 0.5)].index.tolist()
+        if medium_missing_cols:
+            suggestions.append(f"Rozważ wypełnienie brakujących wartości w kolumnach: {medium_missing_cols}")
+    
+    # Sprawdź duplikaty
+    duplicates = data.duplicated().sum()
+    if duplicates > 0:
+        suggestions.append(f"Znaleziono {duplicates} zduplikowanych wierszy - rozważ ich usunięcie")
+    
+    # Sprawdź kolumny z jedną wartością
+    constant_cols = []
+    for col in data.columns:
+        if data[col].nunique() <= 1:
+            constant_cols.append(col)
+    
+    if constant_cols:
+        suggestions.append(f"Kolumny z jedną wartością (można usunąć): {constant_cols}")
+    
+    # Sprawdź kolumny numeryczne do skalowania
+    numeric_cols = data.select_dtypes(include=['number']).columns.tolist()
+    if len(numeric_cols) > 1:
+        # Sprawdź różnice w skalach
+        ranges = {}
+        for col in numeric_cols:
+            col_range = data[col].max() - data[col].min()
+            if not pd.isna(col_range):
+                ranges[col] = col_range
+        
+        if ranges:
+            max_range = max(ranges.values())
+            min_range = min(ranges.values())
+            if max_range / min_range > 100:  # Różnica większa niż 100x
+                suggestions.append("Kolumny numeryczne mają bardzo różne skale - rozważ skalowanie danych")
+    
+    # Sprawdź kolumny kategoryczne do kodowania
+    categorical_cols = data.select_dtypes(include=['object']).columns.tolist()
+    high_cardinality_cols = []
+    for col in categorical_cols:
+        unique_count = data[col].nunique()
+        if unique_count > 10:
+            high_cardinality_cols.append(f"{col} ({unique_count} wartości)")
+    
+    if high_cardinality_cols:
+        suggestions.append(f"Kolumny kategoryczne z wysoką kardynalnością: {high_cardinality_cols}")
+    
+    return suggestions
+
+def validate_csv_structure(data):
+    """Waliduje strukturę wczytanego CSV."""
+    validation = {
+        'is_valid': True,
+        'errors': [],
+        'warnings': [],
+        'info': []
+    }
+    
+    if data is None or data.empty:
+        validation['is_valid'] = False
+        validation['errors'].append("Plik jest pusty")
+        return validation
+    
+    # Sprawdź rozmiar
+    if data.shape[0] < 2:
+        validation['warnings'].append("Bardzo mała liczba wierszy (mniej niż 2)")
+    
+    if data.shape[1] < 2:
+        validation['warnings'].append("Bardzo mała liczba kolumn (mniej niż 2)")
+    
+    # Sprawdź nazwy kolumn
+    duplicate_cols = data.columns[data.columns.duplicated()].tolist()
+    if duplicate_cols:
+        validation['errors'].append(f"Zduplikowane nazwy kolumn: {duplicate_cols}")
+        validation['is_valid'] = False
+    
+    # Sprawdź procent brakujących wartości
+    missing_percent = (data.isnull().sum().sum() / (data.shape[0] * data.shape[1])) * 100
+    if missing_percent > 80:
+        validation['errors'].append(f"Zbyt dużo brakujących wartości: {missing_percent:.1f}%")
+        validation['is_valid'] = False
+    elif missing_percent > 50:
+        validation['warnings'].append(f"Dużo brakujących wartości: {missing_percent:.1f}%")
+    elif missing_percent > 0:
+        validation['info'].append(f"Brakujące wartości: {missing_percent:.1f}%")
+    
+    # Sprawdź typy danych
+    type_info = detect_column_types(data)
+    validation['info'].append(f"Wykryte typy kolumn: {type_info}")
+    
+    return validation
 
 def get_column_mapping():
     """Zwraca mapowanie oryginalnych nazw kolumn na proponowane nazwy."""
@@ -68,35 +274,3 @@ def get_column_mapping():
         'A15': 'Roczny_dochód',
         'A16': 'Decyzja_przyznania_kredytu'
     }
-
-def get_column_descriptions():
-    """Zwraca opisy kolumn."""
-    return {
-        'A1': 'b / a – dwie kategorie płci',
-        'A2': 'wartość ciągła (lata)',
-        'A3': 'wartość ciągła (np. dług/dochód)',
-        'A4': 'u, y, l, t – status małżeński',
-        'A5': 'g, p, gg – kategoria klienta',
-        'A6': 'wiele poziomów (np. c, d, cc … ff)',
-        'A7': 'kategoria branży/zawodu',
-        'A8': 'wartość ciągła (lata pracy)',
-        'A9': 't / f – czy posiada rachunek rozliczeniowy',
-        'A10': 't / f – czy posiada rachunek oszczędnościowy',
-        'A11': 'wartość całkowita (np. liczba innych kredytów)',
-        'A12': 't / f – czy ma inne zobowiązania',
-        'A13': 'g, p, s – kategoria celu (np. g = ogólny, p = pojazd, s = edukacja)',
-        'A14': 'wartość całkowita (miesiące)',
-        'A15': 'wartość całkowita (waluta)',
-        'A16': '+ / - – zaakceptowany / odrzucony'
-    }
-
-def get_original_column_name(display_name):
-    """Zwraca oryginalną nazwę kolumny na podstawie nazwy wyświetlanej"""
-    column_mapping = get_column_mapping()
-    reverse_mapping = {v: k for k, v in column_mapping.items()}
-    return reverse_mapping.get(display_name, display_name)
-
-def get_display_column_name(original_name):
-    """Zwraca nazwę wyświetlaną na podstawie oryginalnej nazwy kolumny"""
-    column_mapping = get_column_mapping()
-    return column_mapping.get(original_name, original_name)

@@ -11,16 +11,24 @@ import plotly.figure_factory as ff
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+import importlib
+import sys
+
+if 'data_processing' in sys.modules:
+    importlib.reload(sys.modules['data_processing'])
 
 # Import modułów aplikacji
 from data_loader import (
-    load_csv, load_sample_data, get_dataset_info,
-    get_column_mapping, get_column_descriptions,
-    get_original_column_name, get_display_column_name
+    load_csv, get_dataset_info, detect_column_types, 
+    suggest_data_preprocessing, validate_csv_structure
 )
-from statisticss import calculate_numerical_stats, calculate_categorical_stats, calculate_correlations
+
+from statisticss import (
+    calculate_numerical_stats, calculate_categorical_stats, 
+    calculate_correlations
+)
+
 from data_processing import (
-    remove_rows, remove_columns, replace_values, replace_values_regex,
     handle_missing_values, remove_duplicates, scale_data, encode_categorical,
     select_rows, replace_values_in_columns
 )
@@ -28,183 +36,139 @@ from visualization import (
     histogram, box_plot, scatter_plot, bar_chart, pie_chart, pair_plot
 )
 from modeling import (
-    prepare_data_for_classification,
-    train_classification_model, 
-    evaluate_classification_model,
     prepare_data_for_clustering,
-    train_kmeans_model,
     evaluate_clustering,
     plot_clusters_2d
 )
 
-def get_column_display_names(data):
-    """Zwraca słownik mapujący oryginalne nazwy kolumn na nazwy wyświetlane"""
-    column_mapping = get_column_mapping()
-    
-    # Automatyczne mapowanie nazw kolumn, jeśli mamy 16 kolumn i nie są to standardowe nazwy
-    if data.shape[1] == 16 and not all(col in column_mapping for col in data.columns):
-        temp_mapping = {}
-        for i, col in enumerate(data.columns, 1):
-            standard_name = f'A{i}'
-            temp_mapping[col] = column_mapping.get(standard_name, standard_name)
-        return temp_mapping
-    
-    return {col: column_mapping.get(col, col) for col in data.columns}
-
 def create_column_selector(data, label, key=None, multiselect=True, default=None, **kwargs):
-    """Tworzy selector kolumn z użyciem proponowanych nazw"""
-    columns = data.columns
-    display_names = [get_display_column_name(col) for col in columns]
-    
-    if default is not None:
-        # Konwersja domyślnych wartości na nazwy wyświetlane
-        default = [get_display_column_name(col) for col in default]
+    """Tworzy selector kolumn."""
+    if data is None or data.empty:
+        return [] if multiselect else None
+        
+    columns = data.columns.tolist()
     
     if multiselect:
-        selected_display_names = st.multiselect(
+        selected_columns = st.multiselect(
             label,
-            options=display_names,
+            options=columns,
             default=default,
             key=key,
             **kwargs
         )
-        return [get_original_column_name(name) for name in selected_display_names]
+        return selected_columns
     else:
-        selected_display_name = st.selectbox(
+        # Dla selectbox dodaj opcję None na początku jeśli nie ma default
+        options = columns if default is not None else [None] + columns
+        selected_column = st.selectbox(
             label,
-            options=display_names,
+            options=options,
+            index=0 if default is None else None,
             key=key,
             **kwargs
         )
-        return get_original_column_name(selected_display_name)
+        return selected_column
 
-# Funkcja do bezpiecznego wyświetlania DataFrame
-def safe_display_dataframe(df, column_config=None, use_display_names=True):
-    """
-    Bezpiecznie wyświetla DataFrame w Streamlit z obsługą błędów i mapowaniem nazw kolumn.
-    """
+def safe_display_dataframe(df, column_config=None, use_container_width=True):
+    """Bezpiecznie wyświetla DataFrame w Streamlit."""
     try:
-        # Kopia DataFrame do wyświetlenia
-        df_display = df.copy()
-        
-        if use_display_names:
-            # Mapowanie nazw kolumn na proponowane nazwy
-            df_display.columns = [get_display_column_name(col) for col in df_display.columns]
-        
-        # Konwersja wszystkich kolumn na string
-        df_display = df_display.astype(str)
-        
         if column_config:
-            return st.dataframe(df_display, column_config=column_config)
-        return st.dataframe(df_display)
+            return st.dataframe(df, column_config=column_config, use_container_width=use_container_width)
+        return st.dataframe(df, use_container_width=use_container_width)
     except Exception as e:
         st.error(f"Błąd wyświetlania danych: {str(e)}")
         st.write("Dane w formie tekstowej:")
-        st.write(df.to_string())
+        st.text(str(df))
 
-# Dodaj nowe funkcje na początku pliku, po importach
 def display_missing_values(data):
     """Wyświetla szczegółowe informacje o brakujących wartościach"""
     missing_rows = data[data.isna().any(axis=1)]
     
     if missing_rows.empty:
-        st.info("Brak wierszy z brakującymi wartościami.")
+        st.info("✅ Brak wierszy z brakującymi wartościami.")
         return
         
     missing_cols = data.columns[data.isna().any()].tolist()
     
-    st.write(f"Znaleziono {len(missing_rows)} wierszy z brakującymi wartościami w {len(missing_cols)} kolumnach.")
+    st.write(f"❗ Znaleziono **{len(missing_rows)}** wierszy z brakującymi wartościami w **{len(missing_cols)}** kolumnach.")
     
     # Podsumowanie brakujących wartości
-    missing_summary = pd.DataFrame({
-        'Kolumna': missing_cols,
-        'Liczba brakujących': [data[col].isna().sum() for col in missing_cols],
-        'Procent brakujących': [f"{(data[col].isna().sum() / len(data) * 100):.2f}%" for col in missing_cols]
-    })
+    missing_summary = []
+    for col in missing_cols:
+        missing_count = data[col].isna().sum()
+        missing_percent = (missing_count / len(data)) * 100
+        missing_summary.append({
+            'Kolumna': col,
+            'Liczba brakujących': missing_count,
+            'Procent brakujących': f"{missing_percent:.1f}%"
+        })
     
-    st.write("Podsumowanie brakujących wartości per kolumna:")
-    safe_display_dataframe(missing_summary, use_display_names=False)
+    st.write("**Podsumowanie brakujących wartości:**")
+    safe_display_dataframe(pd.DataFrame(missing_summary))
     
-    # Szczegóły brakujących wartości w wierszach
-    st.write("\nSzczegóły wierszy z brakującymi wartościami:")
-    
-    # Zamiast zagnieżdżonych expanderów, używamy tabelki z wszystkimi informacjami
-    missing_details = []
-    for idx, row in missing_rows.iterrows():
-        missing_in_row = row[row.isna()].index.tolist()
-        for col in missing_in_row:
-            missing_details.append({
-                'Indeks wiersza': idx,
-                'Kolumna': col,
-                'Wartość': 'Brak'
-            })
-    
-    if missing_details:
-        details_df = pd.DataFrame(missing_details)
-        st.dataframe(
-            details_df,
-            column_config={
-                "Indeks wiersza": st.column_config.NumberColumn(width="small"),
-                "Kolumna": st.column_config.TextColumn(width="medium"),
-                "Wartość": st.column_config.TextColumn(width="small")
-            }
-        )
+    # Opcjonalnie pokaż szczegóły
+    if st.checkbox("🔍 Pokaż szczegóły brakujących wartości", key="show_missing_details"):
+        st.write("**Wiersze z brakującymi wartościami:**")
+        
+        # Ograniczymy wyświetlanie do pierwszych 100 wierszy z problemami
+        display_missing = missing_rows.head(100)
+        
+        # Podświetl brakujące wartości
+        def highlight_missing(val):
+            return 'background-color: #ffcccc' if pd.isna(val) else ''
+        
+        styled_df = display_missing.style.applymap(highlight_missing)
+        st.dataframe(styled_df, use_container_width=True)
+        
+        if len(missing_rows) > 100:
+            st.info(f"Pokazano pierwsze 100 z {len(missing_rows)} wierszy z brakującymi wartościami")
 
 def create_editable_dataframe(data, start_idx, end_idx):
-    """Tworzy edytowalny dataframe z zachowaniem oryginalnych indeksów"""
+    """Tworzy edytowalny dataframe."""
     display_data = data.iloc[start_idx:end_idx].copy()
     
-    # Sprawdź czy kolumna 'ID' już istnieje i usuń ją jeśli tak
-    if 'ID' in display_data.columns:
-        display_data = display_data.drop(columns=['ID'])
-    
-    # Dodaj kolumnę z indeksami na początku, zaczynając od 0
-    display_data.insert(0, 'ID', display_data.index)
-    
-    # Mapuj nazwy kolumn na przyjazne nazwy (oprócz kolumny indeksu)
-    display_names = ['ID']
-    for col in data.columns:
-        if col != 'ID':  # Nie mapuj kolumny indeksu ponownie
-            display_names.append(get_display_column_name(col))
-    
-    display_data.columns = display_names
+    # Dodaj kolumnę z indeksami na początku
+    display_data.insert(0, 'Indeks', display_data.index)
     
     # Konfiguracja kolumn
     column_config = {
-        'ID': st.column_config.NumberColumn(
+        'Indeks': st.column_config.NumberColumn(
             width='small',
-            help='Identyfikator wiersza (od 0)',
+            help='Numer wiersza w zbiorze danych',
             disabled=True
         )
     }
     
     # Dodaj konfigurację dla pozostałych kolumn
-    column_config.update({
-        col: st.column_config.Column(
+    for col in data.columns:
+        column_config[col] = st.column_config.Column(
             label=col,
-            width="medium",
-            required=True
-        ) for col in display_names[1:]  # Pomijamy kolumnę ID
-    })
+            width="medium"
+        )
+    
+    # Unikalny klucz używający countera
+    st.session_state.editor_counter += 1
+    unique_key = f"editor_{start_idx}_{end_idx}_{st.session_state.editor_counter}"
     
     # Wyświetl edytowalną tabelę
     edited_df = st.data_editor(
         display_data,
         column_config=column_config,
         num_rows="dynamic",
-        key=f"editor_{start_idx}_{end_idx}"
+        key=unique_key,
+        use_container_width=True
     )
     
-    if not edited_df.equals(display_data):
-        # Usuń kolumnę ID przed zapisem zmian
-        edited_df = edited_df.drop(columns=['ID'])
-        # Przywróć oryginalne nazwy kolumn
-        edited_df.columns = data.columns
-        
+    # Sprawdź czy były zmiany (porównaj bez kolumny Indeks)
+    display_without_index = display_data.drop(columns=['Indeks'])
+    edited_without_index = edited_df.drop(columns=['Indeks']) if 'Indeks' in edited_df.columns else edited_df
+    
+    if not edited_without_index.equals(display_without_index):
         # Zapisz zmiany w oryginalnych danych
         original_indices = data.iloc[start_idx:end_idx].index
-        st.session_state.data.loc[original_indices] = edited_df
-        st.success("Zmiany zostały zapisane!")
+        st.session_state.data.loc[original_indices] = edited_without_index
+        st.success("✅ Zmiany zostały zapisane!")
+        st.rerun()  # Odśwież widok
     
     return edited_df
 
@@ -219,9 +183,18 @@ def safe_paginated_display(data, rows_per_page, current_page):
         
     except Exception as e:
         st.error(f"Błąd wyświetlania danych: {str(e)}")
+        st.info("Spróbuj zmniejszyć liczbę wyświetlanych wierszy")
+    """Bezpieczne wyświetlanie danych z paginacją"""
+    try:
+        total_rows = len(data)
+        start_idx = (current_page - 1) * rows_per_page
+        end_idx = min(start_idx + rows_per_page, total_rows)
+        
+        create_editable_dataframe(data, start_idx, end_idx)
+        
+    except Exception as e:
+        st.error(f"Błąd wyświetlania danych: {str(e)}")
         st.write("Spróbuj zmniejszyć liczbę wyświetlanych wierszy")
-
-# Add after imports, before main code
 
 def plot_parallel_coordinates(data, labels, features):
     """Tworzy wykres współrzędnych równoległych dla klastrów"""
@@ -311,6 +284,7 @@ if 'data' not in st.session_state:
     st.session_state.data = None
     st.session_state.file_name = None
     st.session_state.page = 1
+    st.session_state.editor_counter = 0
 
 if 'clustering_state' not in st.session_state:
     st.session_state.clustering_state = {
@@ -328,532 +302,796 @@ st.title("Analiza zbioru Credit Approval")
 
 # Sidebar - wczytywanie danych
 with st.sidebar:
-    st.header("Wczytywanie danych")
+    st.header("📁 Wczytywanie danych")
+    st.markdown("Wybierz plik CSV do analizy")
 
-    upload_option = st.radio(
-        "Wybierz sposób wczytania danych",
-        ["Wczytaj plik CSV", "Użyj przykładowego zbioru danych"],
-        index=1
+    uploaded_file = st.file_uploader(
+        "Wybierz plik CSV", 
+        type=["csv"],
+        help="Obsługiwane formaty: CSV z różnymi separatorami (,;|\\t)"
     )
 
-    if upload_option == "Wczytaj plik CSV":
-        uploaded_file = st.file_uploader("Wybierz plik CSV", type=["csv"])
-
-        if uploaded_file is not None:
+    if uploaded_file is not None:
+        with st.spinner("🔄 Wczytywanie i analizowanie pliku..."):
             # Wczytanie pliku
             data = load_csv(uploaded_file)
+            
             if data is not None:
-                st.session_state.data = data
-                st.session_state.file_name = uploaded_file.name
-                st.success(f"Wczytano plik: {uploaded_file.name}")
-            else:
-                st.error("Błąd wczytywania pliku.")
-    else:
-        if st.button("Wczytaj przykładowy zbioru Credit Approval"):
-            with st.spinner("Wczytywanie przykładowych danych..."):
-                data = load_sample_data()
-                if data is not None:
+                # Walidacja struktury
+                validation = validate_csv_structure(data)
+                
+                if validation['is_valid']:
+                    # Zapisz dane do sesji
                     st.session_state.data = data
-                    st.session_state.file_name = "credit_approval.csv"
-                    st.success("Wczytano przykładowy zbiór danych.")
+                    st.session_state.file_name = uploaded_file.name
+                    
+                    st.success(f"✅ Plik wczytany pomyślnie!")
+                    
+                    # Wyświetl błędy jeśli są
+                    if validation['errors']:
+                        st.error("❌ Błędy:")
+                        for error in validation['errors']:
+                            st.write(f"• {error}")
+                    
+                    # Wyświetl ostrzeżenia jeśli są
+                    if validation['warnings']:
+                        st.warning("⚠️ Ostrzeżenia:")
+                        for warning in validation['warnings']:
+                            st.write(f"• {warning}")
+                    
+                    # Wyświetl informacje dodatkowe
+                    if validation['info']:
+                        with st.expander("ℹ️ Dodatkowe informacje"):
+                            for info in validation['info']:
+                                st.write(f"• {info}")
                 else:
-                    st.error("Błąd wczytywania przykładowych danych.")
+                    st.error("❌ Plik zawiera błędy krytyczne i nie może być wczytany")
+                    for error in validation['errors']:
+                        st.write(f"• {error}")
+    
+    else:
+        st.info("👆 Wczytaj plik CSV, aby rozpocząć analizę")
+        
+        # Przykłady formatów CSV
+        with st.expander("📋 Obsługiwane formaty CSV"):
+            st.markdown("""
+            **Separatory:** `,` `;` `|` `\\t` (tab)
+            
+            **Kodowanie:** UTF-8, Latin-1, CP1250, ISO-8859-1
+            
+            **Brakujące wartości:** `?` `NA` `N/A` `null` (puste komórki)
+            
+            **Przykład poprawnego pliku:**
+            ```
+            nazwa,wiek,miasto
+            Jan,25,Warszawa
+            Anna,30,Kraków
+            ```
+            """)
 
-    # Informacje o zbiorze danych
+    # Informacje o zbiorze danych (tylko jeśli dane są wczytane)
     if st.session_state.data is not None:
-        st.subheader("Informacje o zbiorze danych")
-        info = get_dataset_info(st.session_state.data)
-        st.write(f"Liczba wierszy: {info['rows']}")
-        st.write(f"Liczba kolumn: {info['columns']}")
-        st.write(f"Brakujące wartości: {info['missing_values']}")
-        st.write(f"Zduplikowane wiersze: {info['duplicated_rows']}")
-
-        if st.checkbox("Pokaż typy danych"):
-            dtypes_df = pd.DataFrame({'Typ danych': st.session_state.data.dtypes})
-            safe_display_dataframe(dtypes_df)
-
-        if st.checkbox("Pokaż korelacje"):
-            corr_matrix = calculate_correlations(st.session_state.data)
-            safe_display_dataframe(corr_matrix)
-
-        if st.checkbox("Pokaż nazwy kolumn"):
-            column_names = info['columns_names']
-            display_names = [get_display_column_name(col) for col in column_names]
+        st.divider()
+        st.subheader("📊 Informacje o danych")
+        
+        data = st.session_state.data
+        info = get_dataset_info(data)
+        
+        # Podstawowe metryki w kolumnach
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("📏 Wiersze", info['rows'])
+            st.metric("❓ Brakujące", info['missing_values'])
+        with col2:
+            st.metric("🔢 Kolumny", info['columns'])
+            st.metric("🔄 Duplikaty", info['duplicated_rows'])
+        
+        # Rozmiar w pamięci
+        st.metric("💾 Rozmiar", f"{info['memory_usage']:.2f} MB")
+        
+        # Expandable sections
+        with st.expander("🔍 Podgląd danych"):
+            st.write("**Pierwsze 5 wierszy:**")
+            st.dataframe(data.head(), use_container_width=True)
             
-            # Utworzenie DataFrame z oryginalnymi i proponowanymi nazwami
-            names_df = pd.DataFrame({
-                'Oryg. kod': column_names,
-                'Proponowana nazwa (PL)': display_names
-            })
+            st.write("**Ostatnie 5 wierszy:**")
+            st.dataframe(data.tail(), use_container_width=True)
+        
+        with st.expander("🏷️ Typy kolumn"):
+            col_types = detect_column_types(data)
+            type_df = pd.DataFrame([
+                {"Kolumna": col, "Wykryty typ": col_types.get(col, "nieznany"), "Pandas dtype": str(data[col].dtype)}
+                for col in data.columns
+            ])
+            st.dataframe(type_df, use_container_width=True)
+        
+        with st.expander("📈 Podstawowe statystyki"):
+            # Numeryczne
+            numeric_cols = info['numeric_columns']
+            if numeric_cols:
+                st.write("**Kolumny numeryczne:**")
+                st.dataframe(data[numeric_cols].describe(), use_container_width=True)
             
-            # Wyświetlenie tabeli z formatowaniem
-            safe_display_dataframe(
-                names_df,
-                column_config={
-                    "Oryg. kod": st.column_config.TextColumn(width="small"),
-                    "Proponowana nazwa (PL)": st.column_config.TextColumn(width="medium")
-                }
-            )
+            # Kategoryczne
+            categorical_cols = info['categorical_columns']
+            if categorical_cols:
+                st.write("**Kolumny kategoryczne:**")
+                cat_stats = []
+                for col in categorical_cols[:5]:  # Maksymalnie 5 kolumn
+                    cat_stats.append({
+                        "Kolumna": col,
+                        "Unikalne wartości": data[col].nunique(),
+                        "Najczęstsza wartość": data[col].mode().iloc[0] if not data[col].mode().empty else "N/A",
+                        "Brakujące": data[col].isnull().sum()
+                    })
+                
+                if cat_stats:
+                    st.dataframe(pd.DataFrame(cat_stats), use_container_width=True)
+        
+        with st.expander("💡 Sugestie preprocessing"):
+            suggestions = suggest_data_preprocessing(data)
+            if suggestions:
+                for i, suggestion in enumerate(suggestions, 1):
+                    st.write(f"{i}. {suggestion}")
+            else:
+                st.info("Dane wyglądają dobrze - brak konkretnych sugestii")
+        
+        # Status gotowości
+        st.divider()
+        missing_data = info['missing_values']
+        duplicates = info['duplicated_rows']
+        
+        if missing_data == 0 and duplicates == 0:
+            st.success("✅ Dane gotowe do analizy!")
+        else:
+            issues = []
+            if missing_data > 0:
+                issues.append(f"{missing_data} brakujących wartości")
+            if duplicates > 0:
+                issues.append(f"{duplicates} duplikatów")
+            
+            st.warning(f"⚠️ Wykryto: {', '.join(issues)}")
+            st.info("💡 Użyj zakładki 'Przetwarzanie danych' aby rozwiązać problemy")
+        
+        # Reset danych
+        if st.button("🔄 Wyczyść dane", help="Usuń wczytane dane i zacznij od nowa"):
+            st.session_state.data = None
+            st.session_state.file_name = None
+            st.rerun()
 
 # Główny panel aplikacji
 if st.session_state.data is not None:
     data = st.session_state.data
 
-    # Wyświetlenie wszystkich danych z paginacją
-    st.subheader("Podgląd danych")
+    # Nagłówek z informacjami o pliku
+    st.header(f"📊 Analiza danych: {st.session_state.file_name}")
     
-    # Dodaj opcję filtrowania wierszy
-    filter_rows = st.checkbox("Filtruj wiersze po indeksach")
-    if filter_rows:
-        indices_help = """
-        Wprowadź indeksy wierszy w jednym z formatów:
-        - Pojedyncze liczby: "1,3,5"
-        - Zakresy: "1-5"
-        - Kombinacje: "1,3-5,7,10-12"
-        """
-        indices_str = st.text_input("Indeksy wierszy:", help=indices_help)
-        
-        if indices_str:
-            try:
-                # Parsowanie indeksów
-                indices = set()
-                for part in indices_str.split(','):
-                    if '-' in part:
-                        start, end = map(int, part.split('-'))
-                        indices.update(range(start, end + 1))
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Wiersze", data.shape[0])
+    with col2:
+        st.metric("Kolumny", data.shape[1])
+    with col3:
+        missing_count = data.isnull().sum().sum()
+        st.metric("Brakujące", missing_count)
+    with col4:
+        duplicate_count = data.duplicated().sum()
+        st.metric("Duplikaty", duplicate_count)
+
+    # Wyświetlenie danych z paginacją
+    st.subheader("🔍 Podgląd i edycja danych")
+    
+    # Opcje filtrowania
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Filtrowanie wierszy
+        filter_rows = st.checkbox("🎯 Filtruj wiersze po indeksach")
+        if filter_rows:
+            indices_help = """
+            Wprowadź indeksy wierszy w jednym z formatów:
+            - Pojedyncze liczby: "1,3,5"
+            - Zakresy: "1-5"
+            - Kombinacje: "1,3-5,7,10-12"
+            """
+            indices_str = st.text_input("Indeksy wierszy:", help=indices_help, key="filter_indices")
+            
+            if indices_str:
+                try:
+                    # Parsowanie indeksów
+                    indices = set()
+                    for part in indices_str.split(','):
+                        if '-' in part:
+                            start, end = map(int, part.split('-'))
+                            indices.update(range(start, end + 1))
+                        else:
+                            indices.add(int(part))
+                    
+                    # Filtrowanie danych
+                    valid_indices = [i for i in indices if i < len(data)]
+                    if valid_indices:
+                        filtered_data = data.loc[valid_indices]
+                        total_rows = len(filtered_data)
+                        data_to_display = filtered_data
+                        st.success(f"✅ Filtrowanie: {len(valid_indices)} wierszy")
                     else:
-                        indices.add(int(part))
-                
-                # Filtrowanie danych
-                filtered_data = data.loc[sorted(indices)]
-                total_rows = len(filtered_data)
-                data_to_display = filtered_data
-            except Exception as e:
-                st.error(f"Błąd w formacie indeksów: {str(e)}")
+                        st.warning("⚠️ Brak prawidłowych indeksów")
+                        data_to_display = data
+                        total_rows = len(data)
+                except Exception as e:
+                    st.error(f"❌ Błąd w formacie indeksów: {str(e)}")
+                    data_to_display = data
+                    total_rows = len(data)
+            else:
                 data_to_display = data
                 total_rows = len(data)
         else:
             data_to_display = data
             total_rows = len(data)
-    else:
-        data_to_display = data
-        total_rows = len(data)
-
-    # Kontrolka do wyboru liczby wierszy na stronie
-    rows_per_page = st.selectbox(
-        "Liczba wierszy na stronie",
-        options=[10, 20, 50, 100, 500, "Wszystkie"],
-        index=0
-    )
     
-    # Obliczenie całkowitej liczby stron
+    with col2:
+        # Kontrolka liczby wierszy na stronie
+        rows_per_page = st.selectbox(
+            "Wierszy na stronie",
+            options=[5, 10, 20, 50, 100, "Wszystkie"],
+            index=1,
+            key="rows_per_page"
+        )
+    
+    # Obliczenia paginacji
     if rows_per_page == "Wszystkie":
         rows_per_page = total_rows
     else:
         rows_per_page = int(rows_per_page)
     
-    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+    total_pages = max(1, (total_rows + rows_per_page - 1) // rows_per_page)
     
-    # Użyj wartości z sesji zamiast zmiennej lokalnej
+    # Inicjalizacja strony
     if 'page' not in st.session_state:
         st.session_state.page = 1
     
-    # Wybór strony
-    if total_pages > 1:
-        current_page = st.number_input(
-            f"Strona (1-{total_pages})", 
-            min_value=1, 
-            max_value=total_pages, 
-            value=st.session_state.page
-        )
-        st.session_state.page = current_page
-    else:
-        st.session_state.page = 1
+    # Upewnij się, że numer strony jest w prawidłowym zakresie
+    st.session_state.page = max(1, min(st.session_state.page, total_pages))
     
-    # Obliczenie zakresu wierszy do wyświetlenia
+    # Wybór strony (tylko jeśli więcej niż 1 strona)
+    if total_pages > 1:
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            current_page = st.number_input(
+                f"Strona (1-{total_pages})", 
+                min_value=1, 
+                max_value=total_pages, 
+                value=st.session_state.page,
+                key="page_selector"
+            )
+            st.session_state.page = current_page
+    
+    # Obliczenie zakresu wierszy
     start_idx = (st.session_state.page - 1) * rows_per_page
     end_idx = min(start_idx + rows_per_page, total_rows)
     
-    # Wyświetlenie informacji o zakresie
-    st.write(f"Wyświetlanie wierszy {start_idx + 1}-{end_idx} z {total_rows}")
+    # Informacja o zakresie
+    st.write(f"Wyświetlanie wierszy **{start_idx + 1}-{end_idx}** z **{total_rows}**")
     
-    # Modyfikacja funkcji create_editable_dataframe aby pokazywała indeksy
-    def create_editable_dataframe(data, start_idx, end_idx):
-        """Tworzy edytowalny dataframe z zachowaniem oryginalnych indeksów"""
-        display_data = data.iloc[start_idx:end_idx].copy()
-        
-        # Sprawdź czy kolumna 'ID' już istnieje i usuń ją jeśli tak
-        if 'ID' in display_data.columns:
-            display_data = display_data.drop(columns=['ID'])
-        
-        # Dodaj kolumnę z indeksami na początku, zaczynając od 0
-        display_data.insert(0, 'ID', display_data.index)
-        
-        # Mapuj nazwy kolumn na przyjazne nazwy (oprócz kolumny indeksu)
-        display_names = ['ID']
-        for col in data.columns:
-            if col != 'ID':  # Nie mapuj kolumny indeksu ponownie
-                display_names.append(get_display_column_name(col))
-        
-        display_data.columns = display_names
-        
-        # Konfiguracja kolumn
-        column_config = {
-            'ID': st.column_config.NumberColumn(
-                width='small',
-                help='Identyfikator wiersza (od 0)',
-                disabled=True
-            )
-        }
-        
-        # Dodaj konfigurację dla pozostałych kolumn
-        column_config.update({
-            col: st.column_config.Column(
-                label=col,
-                width="medium",
-                required=True
-            ) for col in display_names[1:]  # Pomijamy kolumnę ID
-        })
-        
-        # Wyświetl edytowalną tabelę
-        edited_df = st.data_editor(
-            display_data,
-            column_config=column_config,
-            num_rows="dynamic",
-            key=f"editor_{start_idx}_{end_idx}"
-        )
-        
-        if not edited_df.equals(display_data):
-            # Usuń kolumnę ID przed zapisem zmian
-            edited_df = edited_df.drop(columns=['ID'])
-            # Przywróć oryginalne nazwy kolumn
-            edited_df.columns = data.columns
-            
-            # Zapisz zmiany w oryginalnych danych
-            original_indices = data.iloc[start_idx:end_idx].index
-            st.session_state.data.loc[original_indices] = edited_df
-            st.success("Zmiany zostały zapisane!")
-        
-        return edited_df
-
     # Wyświetlenie danych
     safe_paginated_display(data_to_display, rows_per_page, st.session_state.page)
-
-    # Dodanie przycisków nawigacji
+    
+    # Przyciski nawigacji (tylko jeśli więcej niż 1 strona)
     if total_pages > 1:
-        cols = st.columns(4)
+        col1, col2, col3, col4 = st.columns(4)
         
-        with cols[0]:
-            if st.button("⏮️ Pierwsza", disabled=st.session_state.page==1):
+        with col1:
+            if st.button("⏮️ Pierwsza", disabled=st.session_state.page==1, key="nav_first"):
                 st.session_state.page = 1
                 st.rerun()
                 
-        with cols[1]:
-            if st.button("◀️ Poprzednia", disabled=st.session_state.page==1):
+        with col2:
+            if st.button("◀️ Poprzednia", disabled=st.session_state.page==1, key="nav_prev"):
                 st.session_state.page = max(1, st.session_state.page - 1)
                 st.rerun()
                 
-        with cols[2]:
-            if st.button("▶️ Następna", disabled=st.session_state.page==total_pages):
+        with col3:
+            if st.button("▶️ Następna", disabled=st.session_state.page==total_pages, key="nav_next"):
                 st.session_state.page = min(total_pages, st.session_state.page + 1)
                 st.rerun()
                 
-        with cols[3]:
-            if st.button("⏭️ Ostatnia", disabled=st.session_state.page==total_pages):
+        with col4:
+            if st.button("⏭️ Ostatnia", disabled=st.session_state.page==total_pages, key="nav_last"):
                 st.session_state.page = total_pages
                 st.rerun()
 
-    # Zakładki
+    # Zakładki analizy
     tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Statystyki",
-        "🔧 Przetwarzanie danych",
-        "📈 Wizualizacja",
-        "🤖 Grupowanie"
+        "📈 Statystyki", 
+        "🔧 Przetwarzanie", 
+        "📊 Wizualizacje", 
+        "🎯 Grupowanie"
     ])
 
     # Zakładka 1: Statystyki
     with tab1:
-        st.header("Analiza statystyczna")
+        st.header("📈 Analiza statystyczna")
         
-        # Dodaj na początku zakładki:
-        st.subheader("Brakujące wartości")
+        # Brakujące wartości
+        st.subheader("❓ Brakujące wartości")
         display_missing_values(data)
-
-        st.subheader("Statystyki dla kolumn numerycznych")
-        num_stats = calculate_numerical_stats(data)
-        if num_stats is not None:
-            safe_display_dataframe(num_stats)
+        
+        st.divider()
+        
+        # Statystyki numeryczne
+        st.subheader("🔢 Statystyki dla kolumn numerycznych")
+        numeric_cols = data.select_dtypes(include=['number']).columns.tolist()
+        
+        if numeric_cols:
+            num_stats = calculate_numerical_stats(data)
+            if num_stats is not None:
+                st.dataframe(num_stats, use_container_width=True)
+                
+                # Dodatkowe informacje
+                with st.expander("ℹ️ Wyjaśnienie statystyk"):
+                    st.markdown("""
+                    - **count**: liczba niepustych wartości
+                    - **mean**: średnia arytmetyczna
+                    - **std**: odchylenie standardowe
+                    - **min/max**: wartości minimalne/maksymalne
+                    - **25%/50%/75%**: kwartyle (percentyle)
+                    """)
         else:
             st.info("Brak kolumn numerycznych w zbiorze danych.")
-
-        st.subheader("Statystyki dla kolumn kategorycznych")
-        cat_stats = calculate_categorical_stats(data)
-        if cat_stats is not None:
-            for col, stats in cat_stats.items():
-                display_name = get_display_column_name(col)
-                with st.expander(f"**{display_name}**"):
-                    st.write(f"Unikalne wartości: {stats['Unikalne wartości']}")
-                    st.write(f"Moda: {stats['Moda']}")
-                    st.write(f"Liczba wystąpień mody: {stats['Liczba wystąpień mody']}")
-                    st.write(f"Brakujące wartości: {stats['Brakujące wartości']}")
-                    st.write("Najczęstsze wartości:")
-                    for val, count in stats['Najczęstsze 5 wartości'].items():
-                        st.write(f"- {val}: {count}")
+        
+        st.divider()
+        
+        # Statystyki kategoryczne
+        st.subheader("🏷️ Statystyki dla kolumn kategorycznych")
+        categorical_cols = data.select_dtypes(include=['object', 'category']).columns.tolist()
+        
+        if categorical_cols:
+            cat_stats = calculate_categorical_stats(data)
+            if cat_stats is not None:
+                for col, stats in cat_stats.items():
+                    with st.expander(f"**{col}**"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Unikalne wartości", stats['Unikalne wartości'])
+                            st.metric("Brakujące wartości", stats['Brakujące wartości'])
+                        with col2:
+                            st.write(f"**Moda:** {stats['Moda']}")
+                            st.write(f"**Liczba wystąpień mody:** {stats['Liczba wystąpień mody']}")
+                        
+                        st.write("**Top 5 wartości:**")
+                        top_values = pd.DataFrame(
+                            list(stats['Najczęstsze 5 wartości'].items()),
+                            columns=['Wartość', 'Liczba wystąpień']
+                        )
+                        st.dataframe(top_values, use_container_width=True)
         else:
             st.info("Brak kolumn kategorycznych w zbiorze danych.")
+        
+        st.divider()
+        
+        # Korelacje
+        st.subheader("🔗 Korelacje między atrybutami")
+        
+        if len(numeric_cols) >= 2:
+            correlation_method = st.selectbox(
+                "Wybierz metodę korelacji",
+                ["pearson", "kendall", "spearman"],
+                index=0,
+                help="Pearson: liniowa, Kendall/Spearman: nieparametryczne"
+            )
 
-        st.subheader("Korelacje między atrybutami")
-        correlation_method = st.selectbox(
-            "Wybierz metodę korelacji",
-            ["pearson", "kendall", "spearman"],
-            index=0
-        )
-
-        corr_matrix = calculate_correlations(data, method=correlation_method)
-        if corr_matrix is not None:
-            safe_display_dataframe(corr_matrix)
+            corr_matrix = calculate_correlations(data, method=correlation_method)
+            if corr_matrix is not None:
+                # Wyświetl macierz korelacji
+                st.dataframe(corr_matrix.round(3), use_container_width=True)
+                
+                # Opcjonalna mapa cieplna
+                if st.checkbox("🌡️ Pokaż mapę cieplną korelacji"):
+                    import plotly.express as px
+                    fig = px.imshow(
+                        corr_matrix,
+                        text_auto=True,
+                        aspect="auto",
+                        title=f"Mapa cieplna korelacji ({correlation_method})",
+                        color_continuous_scale='RdBu_r'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Najsilniejsze korelacje
+                if len(corr_matrix.columns) > 1:
+                    with st.expander("🔍 Najsilniejsze korelacje"):
+                        # Znajdź pary z najsilniejszą korelacją
+                        corr_pairs = []
+                        for i in range(len(corr_matrix.columns)):
+                            for j in range(i+1, len(corr_matrix.columns)):
+                                corr_val = corr_matrix.iloc[i, j]
+                                if not pd.isna(corr_val):
+                                    corr_pairs.append({
+                                        'Kolumna 1': corr_matrix.columns[i],
+                                        'Kolumna 2': corr_matrix.columns[j],
+                                        'Korelacja': corr_val
+                                    })
+                        
+                        if corr_pairs:
+                            corr_df = pd.DataFrame(corr_pairs)
+                            corr_df = corr_df.reindex(corr_df['Korelacja'].abs().sort_values(ascending=False).index)
+                            st.dataframe(corr_df.head(10), use_container_width=True)
+            else:
+                st.info("Nie można obliczyć korelacji - brak odpowiednich danych numerycznych.")
         else:
-            st.info("Brak kolumn numerycznych do obliczenia korelacji.")
+            st.info("Potrzebne są co najmniej 2 kolumny numeryczne do obliczenia korelacji.")
 
     # Zakładka 2: Przetwarzanie danych
     with tab2:
-        st.header("Przetwarzanie danych")
+        st.header("🔧 Przetwarzanie danych")
 
-        # Przycisk do przywracania oryginalnych danych
-        if st.button("Przywróć oryginalne dane"):
-            if st.session_state.file_name == "credit_approval.csv":
-                st.session_state.data = load_sample_data()
-            st.rerun()
+        # Informacje o obecnym stanie danych
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Obecny rozmiar", f"{data.shape[0]} × {data.shape[1]}")
+        with col2:
+            st.metric("Brakujące wartości", data.isnull().sum().sum())
+        with col3:
+            st.metric("Duplikaty", data.duplicated().sum())
 
-        st.write("Bieżący rozmiar danych:", data.shape)
+        # Przycisk resetowania
+        if st.button("🔄 Przywróć oryginalny plik", help="Ponownie wczytaj plik bez zmian"):
+            if st.session_state.file_name:
+                st.rerun()
 
-        processing_option = st.radio(
-            "Wybierz operację na danych",
-            ["Ekstrakcja/usuwanie wierszy", "Zamiana wartości", "Obsługa brakujących danych",
-             "Usuwanie duplikatów", "Skalowanie danych", "Kodowanie zmiennych kategorycznych"]
+        st.divider()
+
+        # Wybór operacji
+        processing_option = st.selectbox(
+            "🎯 Wybierz operację przetwarzania",
+            [
+                "Selekcja/usuwanie wierszy", 
+                "Usuwanie kolumn",
+                "Zamiana wartości", 
+                "Obsługa brakujących danych",
+                "Usuwanie duplikatów", 
+                "Skalowanie danych", 
+                "Kodowanie zmiennych kategorycznych"
+            ]
         )
 
-        if processing_option == "Ekstrakcja/usuwanie wierszy":
-            st.subheader("Ekstrakcja lub usuwanie wierszy")
+        if processing_option == "Selekcja/usuwanie wierszy":
+            st.subheader("🎯 Ekstrakcja lub usuwanie wierszy")
             
             operation_mode = st.radio(
-                "Wybierz tryb operacji",
-                ["Zachowaj wybrane wiersze", "Usuń wybrane wiersze"]
+                "Tryb operacji",
+                ["Zachowaj wybrane wiersze", "Usuń wybrane wiersze"],
+                key="row_operation_mode"
             )
             
             input_method = st.radio(
                 "Sposób wyboru wierszy",
-                ["Po indeksach", "Po wartościach w kolumnie"]
+                ["Po indeksach", "Po wartościach w kolumnie"],
+                key="row_input_method"
             )
 
             if input_method == "Po indeksach":
                 indices_help = """
                 Wprowadź indeksy wierszy w jednym z formatów:
                 - Pojedyncze liczby: "1,3,5"
-                - Zakresy: "1-5"
+                - Zakresy: "1-5"  
                 - Kombinacje: "1,3-5,7,10-12"
                 """
-                indices_str = st.text_input("Indeksy wierszy:", help=indices_help)
+                indices_str = st.text_input("Indeksy wierszy:", help=indices_help, key="process_indices")
                 
-                if st.button("Wykonaj operację"):
+                if st.button("▶️ Wykonaj operację", key="execute_row_indices"):
                     if indices_str:
                         mode = 'keep' if operation_mode == "Zachowaj wybrane wiersze" else 'remove'
+                        from data_processing import select_rows
                         st.session_state.data = select_rows(st.session_state.data, indices_str, mode=mode)
-                        st.success(f"Operacja zakończona pomyślnie")
                         st.rerun()
                     else:
-                        st.warning("Wprowadź indeksy wierszy")
+                        st.warning("⚠️ Wprowadź indeksy wierszy")
 
             else:  # Po wartościach w kolumnie
-                col = create_column_selector(data, "Wybierz kolumnę", multiselect=False)
-                value = st.text_input("Podaj wartość do wyszukania")
+                col = create_column_selector(data, "Wybierz kolumnę", multiselect=False, key="row_filter_col")
+                if col:
+                    # Pokaż unikalne wartości w kolumnie
+                    unique_vals = data[col].value_counts().head(20)
+                    with st.expander(f"🔍 Podgląd wartości w kolumnie '{col}'"):
+                        st.dataframe(unique_vals, use_container_width=True)
+                    
+                    value = st.text_input("Podaj wartość do wyszukania", key="row_filter_value")
+                    
+                    if st.button("▶️ Wykonaj operację", key="execute_row_values"):
+                        if value:
+                            mode = 'keep' if operation_mode == "Zachowaj wybrane wiersze" else 'remove'
+                            mask = data[col].astype(str) == str(value)
+                            indices = data[mask].index.tolist()
+                            
+                            if indices:
+                                from data_processing import select_rows
+                                st.session_state.data = select_rows(
+                                    st.session_state.data, 
+                                    ','.join(map(str, indices)), 
+                                    mode=mode
+                                )
+                                st.rerun()
+                            else:
+                                st.warning(f"⚠️ Nie znaleziono wierszy z wartością '{value}' w kolumnie '{col}'")
+                        else:
+                            st.warning("⚠️ Wprowadź wartość do wyszukania")
+
+        elif processing_option == "Usuwanie kolumn":
+            st.subheader("❌ Usuwanie kolumn")
+            
+            cols_to_remove = create_column_selector(
+                data, 
+                "Wybierz kolumny do usunięcia",
+                multiselect=True,
+                key="cols_to_remove"
+            )
+            
+            if cols_to_remove:
+                st.warning(f"⚠️ Zostaną usunięte kolumny: {cols_to_remove}")
                 
-                if st.button("Wykonaj operację"):
-                    if value:
-                        mode = 'keep' if operation_mode == "Zachowaj wybrane wiersze" else 'remove'
-                        mask = data[col].astype(str) == str(value)
-                        indices = data[mask].index.tolist()
-                        st.session_state.data = select_rows(st.session_state.data, 
-                                                          ','.join(map(str, indices)), 
-                                                          mode=mode)
-                        st.success(f"Operacja zakończona pomyślnie")
-                        st.rerun()
-                    else:
-                        st.warning("Wprowadź wartość do wyszukania")
+                if st.button("❌ Usuń wybrane kolumny", key="execute_remove_cols"):
+                    from data_processing import remove_columns
+                    st.session_state.data = remove_columns(st.session_state.data, cols_to_remove)
+                    st.rerun()
 
         elif processing_option == "Zamiana wartości":
-            st.subheader("Zamiana wartości w kolumnach")
+            st.subheader("🔄 Zamiana wartości w kolumnach")
             
             replacement_mode = st.radio(
                 "Tryb zamiany",
-                ["Pojedyncza zamiana", "Wiele zamian"]
+                ["Pojedyncza zamiana", "Wiele zamian"],
+                key="replacement_mode"
             )
             
             if replacement_mode == "Pojedyncza zamiana":
-                col = create_column_selector(data, "Wybierz kolumnę", multiselect=False)
-                old_value = st.text_input("Stara wartość")
-                new_value = st.text_input("Nowa wartość")
+                col = create_column_selector(data, "Wybierz kolumnę", multiselect=False, key="replace_col")
                 
-                if st.button("Zamień wartości"):
-                    if old_value or old_value == '':
-                        replacements = [(col, old_value, new_value)]
-                        st.session_state.data = replace_values_in_columns(data, replacements)
-                        st.success("Zamiana zakończona pomyślnie")
-                        st.rerun()
-                    else:
-                        st.warning("Wprowadź starą wartość")
+                if col:
+                    # Pokaż unikalne wartości
+                    unique_vals = data[col].value_counts().head(10)
+                    with st.expander(f"🔍 Aktualne wartości w kolumnie '{col}'"):
+                        st.dataframe(unique_vals, use_container_width=True)
+                    
+                    old_value = st.text_input("Stara wartość", key="old_val")
+                    new_value = st.text_input("Nowa wartość", key="new_val")
+                    
+                    if st.button("🔄 Zamień wartości", key="execute_single_replace"):
+                        if old_value or old_value == '':
+                            from data_processing import replace_values
+                            st.session_state.data = replace_values(st.session_state.data, col, old_value, new_value)
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Wprowadź starą wartość")
             
             else:  # Wiele zamian
-                st.write("Wprowadź pary wartości do zamiany")
+                st.write("🔄 Wprowadź pary wartości do zamiany")
                 
-                num_replacements = st.number_input("Liczba zamian", min_value=1, max_value=10, value=1)
+                num_replacements = st.number_input("Liczba zamian", min_value=1, max_value=10, value=2, key="num_replacements")
                 replacements = []
                 
                 for i in range(num_replacements):
-                    st.write(f"Zamiana {i+1}")
-                    col = create_column_selector(data, f"Kolumna {i+1}", multiselect=False, key=f"col_{i}")
-                    old_val = st.text_input(f"Stara wartość {i+1}", key=f"old_{i}")
-                    new_val = st.text_input(f"Nowa wartość {i+1}", key=f"new_{i}")
+                    st.write(f"**Zamiana {i+1}:**")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        col = create_column_selector(data, f"Kolumna", multiselect=False, key=f"multi_col_{i}")
+                    with col2:
+                        old_val = st.text_input(f"Stara wartość", key=f"multi_old_{i}")
+                    with col3:
+                        new_val = st.text_input(f"Nowa wartość", key=f"multi_new_{i}")
                     
                     if col and (old_val or old_val == ''):
                         replacements.append((col, old_val, new_val))
                 
-                if st.button("Wykonaj zamiany"):
+                if st.button("🔄 Wykonaj wszystkie zamiany", key="execute_multi_replace"):
                     if replacements:
-                        st.session_state.data = replace_values_in_columns(data, replacements)
-                        st.success("Zamiany zakończone pomyślnie")
+                        from data_processing import replace_values_in_columns
+                        st.session_state.data = replace_values_in_columns(st.session_state.data, replacements)
                         st.rerun()
                     else:
-                        st.warning("Wprowadź przynajmniej jedną zamianę")
+                        st.warning("⚠️ Wprowadź przynajmniej jedną zamianę")
 
         elif processing_option == "Obsługa brakujących danych":
-            st.subheader("Obsługa brakujących danych")
+            st.subheader("❓ Obsługa brakujących danych")
 
-            na_columns = data.columns[data.isna().any()].tolist()
-            if not na_columns:
-                st.info("Brak kolumn z brakującymi wartościami.")
+            # Pokaż obecne brakujące wartości
+            missing_summary = data.isnull().sum()
+            missing_cols = missing_summary[missing_summary > 0]
+            
+            if len(missing_cols) == 0:
+                st.success("✅ Brak brakujących wartości w danych!")
             else:
-                st.write("Kolumny z brakującymi wartościami:")
-                na_counts = data[na_columns].isna().sum()
-                for col, count in na_counts.items():
-                    display_name = get_display_column_name(col)
-                    st.write(f"- {display_name}: {count} brakujących wartości")
+                st.write("**Kolumny z brakującymi wartościami:**")
+                missing_df = pd.DataFrame({
+                    'Kolumna': missing_cols.index,
+                    'Liczba brakujących': missing_cols.values,
+                    'Procent': (missing_cols.values / len(data) * 100).round(1)
+                })
+                st.dataframe(missing_df, use_container_width=True)
 
                 handling_method = st.radio(
-                    "Wybierz metodę obsługi brakujących danych",
-                    ["Usuń wiersze", "Usuń kolumny", "Wypełnij wartościami"]
+                    "Wybierz metodę obsługi",
+                    ["Usuń wiersze z brakującymi wartościami", 
+                     "Usuń kolumny z brakującymi wartościami", 
+                     "Wypełnij brakujące wartości"],
+                    key="missing_method"
                 )
 
                 target_columns = create_column_selector(
-                    data[na_columns], 
+                    data[missing_cols.index], 
                     "Wybierz kolumny do przetworzenia (puste = wszystkie z brakującymi)",
-                    multiselect=True
+                    multiselect=True,
+                    key="missing_cols"
                 )
 
-                if handling_method == "Usuń wiersze":
-                    if st.button("Usuń wiersze z brakującymi wartościami"):
+                if handling_method == "Usuń wiersze z brakującymi wartościami":
+                    if st.button("❌ Usuń wiersze", key="execute_drop_rows"):
+                        from data_processing import handle_missing_values
                         st.session_state.data = handle_missing_values(
-                            data,
+                            st.session_state.data,
                             method='drop_rows',
-                            columns=target_columns if target_columns else na_columns
+                            columns=target_columns if target_columns else missing_cols.index.tolist()
                         )
-                        st.success("Usunięto wiersze z brakującymi wartościami.")
                         st.rerun()
 
-                elif handling_method == "Usuń kolumny":
-                    if st.button("Usuń kolumny z brakującymi wartościami"):
+                elif handling_method == "Usuń kolumny z brakującymi wartościami":
+                    if st.button("❌ Usuń kolumny", key="execute_drop_cols"):
+                        from data_processing import handle_missing_values
                         st.session_state.data = handle_missing_values(
-                            data,
+                            st.session_state.data,
                             method='drop_columns',
-                            columns=target_columns if target_columns else na_columns
+                            columns=target_columns if target_columns else missing_cols.index.tolist()
                         )
-                        st.success("Usunięto kolumny z brakującymi wartościami.")
                         st.rerun()
 
                 else:  # Wypełnij wartościami
-                    fill_method = st.radio(
-                        "Wybierz metodę wypełniania",
-                        ["mean", "median", "mode", "zero"]
+                    fill_method = st.selectbox(
+                        "Metoda wypełniania",
+                        ["mean", "median", "mode", "zero"],
+                        format_func=lambda x: {
+                            "mean": "Średnia (tylko kolumny numeryczne)",
+                            "median": "Mediana (tylko kolumny numeryczne)", 
+                            "mode": "Moda (najczęstsza wartość)",
+                            "zero": "Zero/puste (0 dla numerycznych, '' dla tekstowych)"
+                        }[x],
+                        key="fill_method"
                     )
 
-                    if st.button("Wypełnij brakujące wartości"):
+                    if st.button("🔧 Wypełnij brakujące wartości", key="execute_fill"):
+                        from data_processing import handle_missing_values
                         st.session_state.data = handle_missing_values(
-                            data,
+                            st.session_state.data,
                             method=fill_method,
-                            columns=target_columns if target_columns else na_columns
+                            columns=target_columns if target_columns else missing_cols.index.tolist()
                         )
-                        st.success(f"Wypełniono brakujące wartości metodą: {fill_method}")
                         st.rerun()
 
         elif processing_option == "Usuwanie duplikatów":
-            st.subheader("Usuwanie duplikatów")
+            st.subheader("🔄 Usuwanie duplikatów")
 
             dup_count = data.duplicated().sum()
-            st.write(f"Liczba zduplikowanych wierszy: {dup_count}")
+            st.metric("Liczba duplikatów", dup_count)
 
             if dup_count > 0:
-                if st.button("Usuń duplikaty"):
-                    st.session_state.data = remove_duplicates(data)
-                    st.success(f"Usunięto {dup_count} zduplikowanych wierszy.")
+                # Pokaż przykłady duplikatów
+                if st.checkbox("🔍 Pokaż przykłady duplikatów"):
+                    duplicated_rows = data[data.duplicated(keep=False)].head(10)
+                    st.dataframe(duplicated_rows, use_container_width=True)
+                
+                if st.button("❌ Usuń duplikaty", key="execute_remove_dups"):
+                    from data_processing import remove_duplicates
+                    st.session_state.data = remove_duplicates(st.session_state.data)
                     st.rerun()
             else:
-                st.info("Brak zduplikowanych wierszy w zbiorze danych.")
+                st.success("✅ Brak duplikatów w zbiorze danych")
 
         elif processing_option == "Skalowanie danych":
-            st.subheader("Skalowanie danych")
+            st.subheader("📏 Skalowanie danych")
 
             # Tylko kolumny numeryczne
             num_cols = data.select_dtypes(include=['number']).columns.tolist()
 
             if not num_cols:
-                st.info("Brak kolumn numerycznych do skalowania.")
+                st.warning("⚠️ Brak kolumn numerycznych do skalowania")
             else:
+                # Pokaż zakresy wartości
+                with st.expander("🔍 Obecne zakresy wartości"):
+                    ranges_data = []
+                    for col in num_cols:
+                        ranges_data.append({
+                            'Kolumna': col,
+                            'Min': data[col].min(),
+                            'Max': data[col].max(),
+                            'Średnia': data[col].mean(),
+                            'Odch. std.': data[col].std()
+                        })
+                    st.dataframe(pd.DataFrame(ranges_data), use_container_width=True)
+
                 scale_method = st.radio(
-                    "Wybierz metodę skalowania",
-                    ["minmax", "standard"]
+                    "Metoda skalowania",
+                    ["minmax", "standard"],
+                    format_func=lambda x: {
+                        "minmax": "Min-Max (0-1)", 
+                        "standard": "Standardyzacja (średnia=0, odch.std=1)"
+                    }[x],
+                    key="scale_method"
                 )
 
                 cols_to_scale = create_column_selector(
-                    data.select_dtypes(include=['number']), 
-                    "Wybierz kolumny do skalowania",
-                    multiselect=True
+                    data[num_cols], 
+                    "Wybierz kolumny do przeskalowania",
+                    multiselect=True,
+                    key="scale_cols"
                 )
 
-                if st.button("Skaluj dane"):
+                if st.button("📏 Skaluj dane", key="execute_scale"):
                     if cols_to_scale:
-                        st.session_state.data = scale_data(data, cols_to_scale, method=scale_method)
-                        st.success(f"Przeskalowano kolumny: {', '.join(cols_to_scale)}")
+                        from data_processing import scale_data
+                        st.session_state.data = scale_data(st.session_state.data, cols_to_scale, method=scale_method)
                         st.rerun()
                     else:
-                        st.warning("Nie wybrano kolumn do skalowania.")
+                        st.warning("⚠️ Wybierz kolumny do skalowania")
 
         elif processing_option == "Kodowanie zmiennych kategorycznych":
-            st.subheader("Kodowanie zmiennych kategorycznych")
+            st.subheader("🏷️ Kodowanie zmiennych kategorycznych")
 
             # Tylko kolumny kategoryczne
             cat_cols = data.select_dtypes(include=['object', 'category']).columns.tolist()
 
             if not cat_cols:
-                st.info("Brak kolumn kategorycznych do kodowania.")
+                st.warning("⚠️ Brak kolumn kategorycznych do kodowania")
             else:
+                # Pokaż informacje o kolumnach kategorycznych
+                with st.expander("🔍 Informacje o kolumnach kategorycznych"):
+                    cat_info = []
+                    for col in cat_cols:
+                        cat_info.append({
+                            'Kolumna': col,
+                            'Unikalne wartości': data[col].nunique(),
+                            'Najczęstsza': data[col].mode().iloc[0] if not data[col].mode().empty else 'N/A',
+                            'Brakujące': data[col].isnull().sum()
+                        })
+                    st.dataframe(pd.DataFrame(cat_info), use_container_width=True)
+
                 encoding_method = st.radio(
-                    "Wybierz metodę kodowania",
-                    ["onehot", "binary"]
+                    "Metoda kodowania",
+                    ["onehot", "binary"],
+                    format_func=lambda x: {
+                        "onehot": "One-Hot Encoding (każda kategoria = osobna kolumna)", 
+                        "binary": "Binary Encoding (reprezentacja binarna)"
+                    }[x],
+                    key="encoding_method"
                 )
 
                 cols_to_encode = create_column_selector(
-                    data.select_dtypes(include=['object', 'category']), 
-                    "Wybierz kolumny do kodowania",
-                    multiselect=True
+                    data[cat_cols], 
+                    "Wybierz kolumny do zakodowania",
+                    multiselect=True,
+                    key="encode_cols"
                 )
 
-                if st.button("Koduj dane"):
+                # Ostrzeżenie o liczbie nowych kolumn
+                if cols_to_encode:
+                    total_new_cols = 0
+                    for col in cols_to_encode:
+                        unique_vals = data[col].nunique()
+                        if encoding_method == "onehot":
+                            total_new_cols += unique_vals
+                        else:  # binary
+                            import math
+                            total_new_cols += math.ceil(math.log2(unique_vals)) if unique_vals > 1 else 1
+                    
+                    st.info(f"ℹ️ Kodowanie utworzy około {total_new_cols} nowych kolumn")
+
+                if st.button("🏷️ Koduj dane", key="execute_encode"):
                     if cols_to_encode:
-                        st.session_state.data = encode_categorical(data, cols_to_encode, method=encoding_method)
-                        st.success(f"Zakodowano kolumny: {', '.join(cols_to_encode)}")
+                        from data_processing import encode_categorical
+                        st.session_state.data = encode_categorical(st.session_state.data, cols_to_encode, method=encoding_method)
                         st.rerun()
                     else:
-                        st.warning("Nie wybrano kolumn do kodowania.")
+                        st.warning("⚠️ Wybierz kolumny do kodowania")
+
 
     # Zakładka 3: Wizualizacja
     with tab3:
@@ -1280,3 +1518,40 @@ if st.session_state.data is not None:
                             for i, feature in enumerate(X_scaled.columns):
                                 fig_density = plot_cluster_density(X_scaled, metrics['labels'], feature)
                                 st.plotly_chart(fig_density, use_container_width=True, key=f"density_plot_main_{feature}_{i}")
+else:
+    # Gdy brak danych
+    st.title("📊 Analizator danych CSV")
+    
+    st.markdown("""
+    ## Witaj w analizatorze danych! 👋
+    
+    Ta aplikacja pozwala na:
+    - 📁 **Wczytywanie** plików CSV
+    - 📈 **Analizę statystyczną** danych
+    - 🔧 **Przetwarzanie** i czyszczenie danych  
+    - 📊 **Wizualizację** wyników
+    - 🎯 **Grupowanie** danych (clustering)
+    
+    ### Jak zacząć?
+    1. Wczytaj plik CSV używając panelu po lewej stronie ⬅️
+    2. Sprawdź jakość danych w zakładce "Statystyki"
+    3. Ewentualnie oczyść dane w zakładce "Przetwarzanie"
+    4. Twórz wizualizacje i analizuj!
+    
+    ### Obsługiwane pliki CSV
+    - Różne separatory (`,` `;` `|` tab)
+    - Różne kodowania (UTF-8, Latin-1, itp.)
+    - Automatyczne wykrywanie brakujących wartości
+    """)
+    
+    # Przykład struktury CSV
+    st.subheader("📋 Przykład poprawnego pliku CSV")
+    
+    example_csv = """nazwa,wiek,miasto,zarobki
+Jan Kowalski,25,Warszawa,5000
+Anna Nowak,30,Kraków,6000
+Piotr Wiśniewski,35,Gdańsk,5500"""
+    
+    st.code(example_csv, language="csv")
+    
+    st.info("💡 **Wskazówka:** Pierwszy wiersz powinien zawierać nazwy kolumn (nagłówki)")
