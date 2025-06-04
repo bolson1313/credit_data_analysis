@@ -6,7 +6,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from .data_loader import get_display_column_name
+from data_loader import get_display_column_name
 
 
 def histogram(data, column, bins=20, title=None):

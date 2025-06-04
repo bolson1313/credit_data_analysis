@@ -13,21 +13,21 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
 # Import modułów aplikacji
-from modules.data_loader import (
+from data_loader import (
     load_csv, load_sample_data, get_dataset_info,
     get_column_mapping, get_column_descriptions,
     get_original_column_name, get_display_column_name
 )
-from modules.statistics import calculate_numerical_stats, calculate_categorical_stats, calculate_correlations
-from modules.data_processing import (
+from statisticss import calculate_numerical_stats, calculate_categorical_stats, calculate_correlations
+from data_processing import (
     remove_rows, remove_columns, replace_values, replace_values_regex,
     handle_missing_values, remove_duplicates, scale_data, encode_categorical,
     select_rows, replace_values_in_columns
 )
-from modules.visualization import (
+from visualization import (
     histogram, box_plot, scatter_plot, bar_chart, pie_chart, pair_plot
 )
-from modules.modeling import (
+from modeling import (
     prepare_data_for_classification,
     train_classification_model, 
     evaluate_classification_model,

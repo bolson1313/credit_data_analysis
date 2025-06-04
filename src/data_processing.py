@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from category_encoders import BinaryEncoder
-from .data_loader import get_display_column_name
+from data_loader import get_display_column_name
 
 
 def remove_rows(data, indices_str):

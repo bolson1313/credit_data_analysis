@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from scipy import stats
-from .data_loader import get_display_column_name
+from data_loader import get_display_column_name
 
 
 def get_original_column_name(column_name):
