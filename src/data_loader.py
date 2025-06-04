@@ -254,6 +254,7 @@ def validate_csv_structure(data):
     
     return validation
 
+
 def get_column_mapping():
     """Zwraca mapowanie oryginalnych nazw kolumn na proponowane nazwy."""
     return {

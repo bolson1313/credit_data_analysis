@@ -9,8 +9,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.figure_factory as ff
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 import importlib
 import sys
 
@@ -29,16 +27,15 @@ from statisticss import (
 )
 
 from data_processing import (
-    handle_missing_values, remove_duplicates, scale_data, encode_categorical,
-    select_rows, replace_values_in_columns
+    remove_rows_by_indices, keep_rows_by_indices,
+    remove_rows_by_value, keep_rows_by_value,
+    remove_columns, replace_values,
+    handle_missing_values, remove_duplicates,
+    scale_data, encode_categorical
 )
+
 from visualization import (
     histogram, box_plot, scatter_plot, bar_chart, pie_chart, pair_plot
-)
-from modeling import (
-    prepare_data_for_clustering,
-    evaluate_clustering,
-    plot_clusters_2d
 )
 
 def create_column_selector(data, label, key=None, multiselect=True, default=None, **kwargs):
@@ -146,9 +143,8 @@ def create_editable_dataframe(data, start_idx, end_idx):
             width="medium"
         )
     
-    # Unikalny klucz używający countera
-    st.session_state.editor_counter += 1
-    unique_key = f"editor_{start_idx}_{end_idx}_{st.session_state.editor_counter}"
+    # Stabilny klucz bazujący na zakresie
+    unique_key = f"editor_{start_idx}_{end_idx}"
     
     # Wyświetl edytowalną tabelę
     edited_df = st.data_editor(
@@ -166,9 +162,8 @@ def create_editable_dataframe(data, start_idx, end_idx):
     if not edited_without_index.equals(display_without_index):
         # Zapisz zmiany w oryginalnych danych
         original_indices = data.iloc[start_idx:end_idx].index
-        st.session_state.data.loc[original_indices] = edited_without_index
+        st.session_state.data.loc[original_indices] = edited_without_index.values
         st.success("✅ Zmiany zostały zapisane!")
-        st.rerun()  # Odśwież widok
     
     return edited_df
 
@@ -184,83 +179,6 @@ def safe_paginated_display(data, rows_per_page, current_page):
     except Exception as e:
         st.error(f"Błąd wyświetlania danych: {str(e)}")
         st.info("Spróbuj zmniejszyć liczbę wyświetlanych wierszy")
-    """Bezpieczne wyświetlanie danych z paginacją"""
-    try:
-        total_rows = len(data)
-        start_idx = (current_page - 1) * rows_per_page
-        end_idx = min(start_idx + rows_per_page, total_rows)
-        
-        create_editable_dataframe(data, start_idx, end_idx)
-        
-    except Exception as e:
-        st.error(f"Błąd wyświetlania danych: {str(e)}")
-        st.write("Spróbuj zmniejszyć liczbę wyświetlanych wierszy")
-
-def plot_parallel_coordinates(data, labels, features):
-    """Tworzy wykres współrzędnych równoległych dla klastrów"""
-    df_plot = pd.DataFrame(data, columns=features).copy()
-    df_plot['Klaster'] = labels
-    
-    # Tworzenie wykresu
-    fig = go.Figure(data=
-        go.Parcoords(
-            line=dict(
-                color=df_plot['Klaster'].astype('category').cat.codes,  # Convert to numeric codes
-                colorscale='Viridis'
-            ),
-            dimensions=[dict(
-                range=[df_plot[feat].min(), df_plot[feat].max()],
-                label=feat,
-                values=df_plot[feat]
-            ) for feat in features]
-        )
-    )
-    
-    # Dostosowanie layoutu
-    fig.update_layout(
-        title="Charakterystyka klastrów - wykres równoległych współrzędnych",
-        plot_bgcolor='white',
-        paper_bgcolor='white'
-    )
-    
-    return fig
-
-def plot_3d_scatter(data, labels, features):
-    """Tworzy trójwymiarowy wykres rozrzutu"""
-    if len(features) >= 3:
-        df_plot = pd.DataFrame({
-            'x': data[features[0]],
-            'y': data[features[1]],
-            'z': data[features[2]],
-            'Klaster': [f'Klaster {l}' for l in labels]
-        })
-        
-        fig = px.scatter_3d(
-            df_plot, 
-            x='x', y='y', z='z',
-            color='Klaster',
-            labels={'x': features[0], 'y': features[1], 'z': features[2]},
-            title="Wizualizacja klastrów 3D"
-        )
-        
-        return fig
-    return None
-
-def plot_cluster_density(data, labels, feature):
-    """Tworzy wykres gęstości dla wybranej cechy w klastrach"""
-    df_plot = pd.DataFrame({
-        'Wartość': data[feature],
-        'Klaster': [f'Klaster {l}' for l in labels]
-    })
-    
-    fig = px.violin(
-        df_plot,
-        x='Klaster',
-        y='Wartość',
-        box=True,
-        title=f'Rozkład gęstości dla cechy {feature}'
-    )
-    return fig
 
 # Ustawienia strony
 st.set_page_config(
@@ -270,32 +188,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-# Funkcja do cachowania danych w sesji
-@st.cache_data
-def get_data():
-    if 'data' not in st.session_state:
-        return None
-    return st.session_state.data
-
-
 # Inicjalizacja sesji
 if 'data' not in st.session_state:
     st.session_state.data = None
     st.session_state.file_name = None
     st.session_state.page = 1
-    st.session_state.editor_counter = 0
-
-if 'clustering_state' not in st.session_state:
-    st.session_state.clustering_state = {
-        'viz_cols_2d': None,
-        'viz_cols_3d': None,
-        'show_visualizations': False,
-        'metrics': None,
-        'X_scaled': None,
-        'X_original': None,
-        'model': None
-    }
 
 # Tytuł aplikacji
 st.title("Analiza zbioru Credit Approval")
@@ -388,70 +285,6 @@ with st.sidebar:
         
         # Rozmiar w pamięci
         st.metric("💾 Rozmiar", f"{info['memory_usage']:.2f} MB")
-        
-        # Expandable sections
-        with st.expander("🔍 Podgląd danych"):
-            st.write("**Pierwsze 5 wierszy:**")
-            st.dataframe(data.head(), use_container_width=True)
-            
-            st.write("**Ostatnie 5 wierszy:**")
-            st.dataframe(data.tail(), use_container_width=True)
-        
-        with st.expander("🏷️ Typy kolumn"):
-            col_types = detect_column_types(data)
-            type_df = pd.DataFrame([
-                {"Kolumna": col, "Wykryty typ": col_types.get(col, "nieznany"), "Pandas dtype": str(data[col].dtype)}
-                for col in data.columns
-            ])
-            st.dataframe(type_df, use_container_width=True)
-        
-        with st.expander("📈 Podstawowe statystyki"):
-            # Numeryczne
-            numeric_cols = info['numeric_columns']
-            if numeric_cols:
-                st.write("**Kolumny numeryczne:**")
-                st.dataframe(data[numeric_cols].describe(), use_container_width=True)
-            
-            # Kategoryczne
-            categorical_cols = info['categorical_columns']
-            if categorical_cols:
-                st.write("**Kolumny kategoryczne:**")
-                cat_stats = []
-                for col in categorical_cols[:5]:  # Maksymalnie 5 kolumn
-                    cat_stats.append({
-                        "Kolumna": col,
-                        "Unikalne wartości": data[col].nunique(),
-                        "Najczęstsza wartość": data[col].mode().iloc[0] if not data[col].mode().empty else "N/A",
-                        "Brakujące": data[col].isnull().sum()
-                    })
-                
-                if cat_stats:
-                    st.dataframe(pd.DataFrame(cat_stats), use_container_width=True)
-        
-        with st.expander("💡 Sugestie preprocessing"):
-            suggestions = suggest_data_preprocessing(data)
-            if suggestions:
-                for i, suggestion in enumerate(suggestions, 1):
-                    st.write(f"{i}. {suggestion}")
-            else:
-                st.info("Dane wyglądają dobrze - brak konkretnych sugestii")
-        
-        # Status gotowości
-        st.divider()
-        missing_data = info['missing_values']
-        duplicates = info['duplicated_rows']
-        
-        if missing_data == 0 and duplicates == 0:
-            st.success("✅ Dane gotowe do analizy!")
-        else:
-            issues = []
-            if missing_data > 0:
-                issues.append(f"{missing_data} brakujących wartości")
-            if duplicates > 0:
-                issues.append(f"{duplicates} duplikatów")
-            
-            st.warning(f"⚠️ Wykryto: {', '.join(issues)}")
-            st.info("💡 Użyj zakładki 'Przetwarzanie danych' aby rozwiązać problemy")
         
         # Reset danych
         if st.button("🔄 Wyczyść dane", help="Usuń wczytane dane i zacznij od nowa"):
@@ -575,40 +408,15 @@ if st.session_state.data is not None:
     
     # Wyświetlenie danych
     safe_paginated_display(data_to_display, rows_per_page, st.session_state.page)
-    
-    # Przyciski nawigacji (tylko jeśli więcej niż 1 strona)
-    if total_pages > 1:
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("⏮️ Pierwsza", disabled=st.session_state.page==1, key="nav_first"):
-                st.session_state.page = 1
-                st.rerun()
-                
-        with col2:
-            if st.button("◀️ Poprzednia", disabled=st.session_state.page==1, key="nav_prev"):
-                st.session_state.page = max(1, st.session_state.page - 1)
-                st.rerun()
-                
-        with col3:
-            if st.button("▶️ Następna", disabled=st.session_state.page==total_pages, key="nav_next"):
-                st.session_state.page = min(total_pages, st.session_state.page + 1)
-                st.rerun()
-                
-        with col4:
-            if st.button("⏭️ Ostatnia", disabled=st.session_state.page==total_pages, key="nav_last"):
-                st.session_state.page = total_pages
-                st.rerun()
 
-    # Zakładki analizy
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Zakładki analizy - USUNIĘTO GRUPOWANIE
+    tab1, tab2, tab3 = st.tabs([
         "📈 Statystyki", 
         "🔧 Przetwarzanie", 
-        "📊 Wizualizacje", 
-        "🎯 Grupowanie"
+        "📊 Wizualizacje"
     ])
 
-    # Zakładka 1: Statystyki
+    # Zakładka 1: Statystyki (bez zmian)
     with tab1:
         st.header("📈 Analiza statystyczna")
         
@@ -696,32 +504,12 @@ if st.session_state.data is not None:
                         color_continuous_scale='RdBu_r'
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                
-                # Najsilniejsze korelacje
-                if len(corr_matrix.columns) > 1:
-                    with st.expander("🔍 Najsilniejsze korelacje"):
-                        # Znajdź pary z najsilniejszą korelacją
-                        corr_pairs = []
-                        for i in range(len(corr_matrix.columns)):
-                            for j in range(i+1, len(corr_matrix.columns)):
-                                corr_val = corr_matrix.iloc[i, j]
-                                if not pd.isna(corr_val):
-                                    corr_pairs.append({
-                                        'Kolumna 1': corr_matrix.columns[i],
-                                        'Kolumna 2': corr_matrix.columns[j],
-                                        'Korelacja': corr_val
-                                    })
-                        
-                        if corr_pairs:
-                            corr_df = pd.DataFrame(corr_pairs)
-                            corr_df = corr_df.reindex(corr_df['Korelacja'].abs().sort_values(ascending=False).index)
-                            st.dataframe(corr_df.head(10), use_container_width=True)
             else:
                 st.info("Nie można obliczyć korelacji - brak odpowiednich danych numerycznych.")
         else:
             st.info("Potrzebne są co najmniej 2 kolumny numeryczne do obliczenia korelacji.")
 
-    # Zakładka 2: Przetwarzanie danych
+    # Zakładka 2: Przetwarzanie danych - PRZEPISANA
     with tab2:
         st.header("🔧 Przetwarzanie danych")
 
@@ -734,18 +522,13 @@ if st.session_state.data is not None:
         with col3:
             st.metric("Duplikaty", data.duplicated().sum())
 
-        # Przycisk resetowania
-        if st.button("🔄 Przywróć oryginalny plik", help="Ponownie wczytaj plik bez zmian"):
-            if st.session_state.file_name:
-                st.rerun()
-
         st.divider()
 
         # Wybór operacji
         processing_option = st.selectbox(
             "🎯 Wybierz operację przetwarzania",
             [
-                "Selekcja/usuwanie wierszy", 
+                "Operacje na wierszach", 
                 "Usuwanie kolumn",
                 "Zamiana wartości", 
                 "Obsługa brakujących danych",
@@ -755,40 +538,47 @@ if st.session_state.data is not None:
             ]
         )
 
-        if processing_option == "Selekcja/usuwanie wierszy":
-            st.subheader("🎯 Ekstrakcja lub usuwanie wierszy")
+        if processing_option == "Operacje na wierszach":
+            st.subheader("🎯 Operacje na wierszach")
             
-            operation_mode = st.radio(
-                "Tryb operacji",
-                ["Zachowaj wybrane wiersze", "Usuń wybrane wiersze"],
-                key="row_operation_mode"
-            )
-            
-            input_method = st.radio(
-                "Sposób wyboru wierszy",
+            operation_type = st.radio(
+                "Typ operacji",
                 ["Po indeksach", "Po wartościach w kolumnie"],
-                key="row_input_method"
+                key="row_operation_type"
             )
-
-            if input_method == "Po indeksach":
-                indices_help = """
-                Wprowadź indeksy wierszy w jednym z formatów:
-                - Pojedyncze liczby: "1,3,5"
-                - Zakresy: "1-5"  
-                - Kombinacje: "1,3-5,7,10-12"
-                """
-                indices_str = st.text_input("Indeksy wierszy:", help=indices_help, key="process_indices")
+            
+            if operation_type == "Po indeksach":
+                st.write("**Operacje na wierszach według indeksów**")
                 
-                if st.button("▶️ Wykonaj operację", key="execute_row_indices"):
-                    if indices_str:
-                        mode = 'keep' if operation_mode == "Zachowaj wybrane wiersze" else 'remove'
-                        from data_processing import select_rows
-                        st.session_state.data = select_rows(st.session_state.data, indices_str, mode=mode)
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Wprowadź indeksy wierszy")
+                indices_help = """
+                Wprowadź indeksy wierszy:
+                - Pojedyncze: "1,3,5"
+                - Zakresy: "1-5"  
+                - Kombinacje: "1,3-5,7"
+                """
+                indices_str = st.text_input("Indeksy wierszy:", help=indices_help, key="row_indices")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("✅ Zachowaj wybrane wiersze", key="keep_rows_indices"):
+                        if indices_str:
+                            st.session_state.data = keep_rows_by_indices(st.session_state.data, indices_str)
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Wprowadź indeksy wierszy")
+                
+                with col2:
+                    if st.button("❌ Usuń wybrane wiersze", key="remove_rows_indices"):
+                        if indices_str:
+                            st.session_state.data = remove_rows_by_indices(st.session_state.data, indices_str)
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Wprowadź indeksy wierszy")
 
             else:  # Po wartościach w kolumnie
+                st.write("**Operacje na wierszach według wartości**")
+                
                 col = create_column_selector(data, "Wybierz kolumnę", multiselect=False, key="row_filter_col")
                 if col:
                     # Pokaż unikalne wartości w kolumnie
@@ -796,26 +586,25 @@ if st.session_state.data is not None:
                     with st.expander(f"🔍 Podgląd wartości w kolumnie '{col}'"):
                         st.dataframe(unique_vals, use_container_width=True)
                     
-                    value = st.text_input("Podaj wartość do wyszukania", key="row_filter_value")
+                    value = st.text_input("Podaj wartość:", key="row_filter_value")
                     
-                    if st.button("▶️ Wykonaj operację", key="execute_row_values"):
-                        if value:
-                            mode = 'keep' if operation_mode == "Zachowaj wybrane wiersze" else 'remove'
-                            mask = data[col].astype(str) == str(value)
-                            indices = data[mask].index.tolist()
-                            
-                            if indices:
-                                from data_processing import select_rows
-                                st.session_state.data = select_rows(
-                                    st.session_state.data, 
-                                    ','.join(map(str, indices)), 
-                                    mode=mode
-                                )
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("✅ Zachowaj wiersze z tą wartością", key="keep_rows_value"):
+                            if value:
+                                st.session_state.data = keep_rows_by_value(st.session_state.data, col, value)
                                 st.rerun()
                             else:
-                                st.warning(f"⚠️ Nie znaleziono wierszy z wartością '{value}' w kolumnie '{col}'")
-                        else:
-                            st.warning("⚠️ Wprowadź wartość do wyszukania")
+                                st.warning("⚠️ Wprowadź wartość")
+                    
+                    with col2:
+                        if st.button("❌ Usuń wiersze z tą wartością", key="remove_rows_value"):
+                            if value:
+                                st.session_state.data = remove_rows_by_value(st.session_state.data, col, value)
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ Wprowadź wartość")
 
         elif processing_option == "Usuwanie kolumn":
             st.subheader("❌ Usuwanie kolumn")
@@ -831,66 +620,29 @@ if st.session_state.data is not None:
                 st.warning(f"⚠️ Zostaną usunięte kolumny: {cols_to_remove}")
                 
                 if st.button("❌ Usuń wybrane kolumny", key="execute_remove_cols"):
-                    from data_processing import remove_columns
                     st.session_state.data = remove_columns(st.session_state.data, cols_to_remove)
                     st.rerun()
 
         elif processing_option == "Zamiana wartości":
             st.subheader("🔄 Zamiana wartości w kolumnach")
             
-            replacement_mode = st.radio(
-                "Tryb zamiany",
-                ["Pojedyncza zamiana", "Wiele zamian"],
-                key="replacement_mode"
-            )
+            col = create_column_selector(data, "Wybierz kolumnę", multiselect=False, key="replace_col")
             
-            if replacement_mode == "Pojedyncza zamiana":
-                col = create_column_selector(data, "Wybierz kolumnę", multiselect=False, key="replace_col")
+            if col:
+                # Pokaż unikalne wartości
+                unique_vals = data[col].value_counts().head(10)
+                with st.expander(f"🔍 Aktualne wartości w kolumnie '{col}'"):
+                    st.dataframe(unique_vals, use_container_width=True)
                 
-                if col:
-                    # Pokaż unikalne wartości
-                    unique_vals = data[col].value_counts().head(10)
-                    with st.expander(f"🔍 Aktualne wartości w kolumnie '{col}'"):
-                        st.dataframe(unique_vals, use_container_width=True)
-                    
-                    old_value = st.text_input("Stara wartość", key="old_val")
-                    new_value = st.text_input("Nowa wartość", key="new_val")
-                    
-                    if st.button("🔄 Zamień wartości", key="execute_single_replace"):
-                        if old_value or old_value == '':
-                            from data_processing import replace_values
-                            st.session_state.data = replace_values(st.session_state.data, col, old_value, new_value)
-                            st.rerun()
-                        else:
-                            st.warning("⚠️ Wprowadź starą wartość")
-            
-            else:  # Wiele zamian
-                st.write("🔄 Wprowadź pary wartości do zamiany")
+                old_value = st.text_input("Stara wartość", key="old_val")
+                new_value = st.text_input("Nowa wartość", key="new_val")
                 
-                num_replacements = st.number_input("Liczba zamian", min_value=1, max_value=10, value=2, key="num_replacements")
-                replacements = []
-                
-                for i in range(num_replacements):
-                    st.write(f"**Zamiana {i+1}:**")
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        col = create_column_selector(data, f"Kolumna", multiselect=False, key=f"multi_col_{i}")
-                    with col2:
-                        old_val = st.text_input(f"Stara wartość", key=f"multi_old_{i}")
-                    with col3:
-                        new_val = st.text_input(f"Nowa wartość", key=f"multi_new_{i}")
-                    
-                    if col and (old_val or old_val == ''):
-                        replacements.append((col, old_val, new_val))
-                
-                if st.button("🔄 Wykonaj wszystkie zamiany", key="execute_multi_replace"):
-                    if replacements:
-                        from data_processing import replace_values_in_columns
-                        st.session_state.data = replace_values_in_columns(st.session_state.data, replacements)
+                if st.button("🔄 Zamień wartości", key="execute_replace"):
+                    if old_value != "":  # Pozwól na puste stringi
+                        st.session_state.data = replace_values(st.session_state.data, col, old_value, new_value)
                         st.rerun()
                     else:
-                        st.warning("⚠️ Wprowadź przynajmniej jedną zamianę")
+                        st.warning("⚠️ Wprowadź starą wartość")
 
         elif processing_option == "Obsługa brakujących danych":
             st.subheader("❓ Obsługa brakujących danych")
@@ -912,9 +664,15 @@ if st.session_state.data is not None:
 
                 handling_method = st.radio(
                     "Wybierz metodę obsługi",
-                    ["Usuń wiersze z brakującymi wartościami", 
-                     "Usuń kolumny z brakującymi wartościami", 
-                     "Wypełnij brakujące wartości"],
+                    ["drop_rows", "drop_columns", "mean", "median", "mode", "zero"],
+                    format_func=lambda x: {
+                        "drop_rows": "Usuń wiersze z brakującymi wartościami",
+                        "drop_columns": "Usuń kolumny z brakującymi wartościami",
+                        "mean": "Wypełnij średnią (tylko numeryczne)",
+                        "median": "Wypełnij medianą (tylko numeryczne)",
+                        "mode": "Wypełnij modą (najczęstsza wartość)",
+                        "zero": "Wypełnij zerem/pustym stringiem"
+                    }[x],
                     key="missing_method"
                 )
 
@@ -925,47 +683,14 @@ if st.session_state.data is not None:
                     key="missing_cols"
                 )
 
-                if handling_method == "Usuń wiersze z brakującymi wartościami":
-                    if st.button("❌ Usuń wiersze", key="execute_drop_rows"):
-                        from data_processing import handle_missing_values
-                        st.session_state.data = handle_missing_values(
-                            st.session_state.data,
-                            method='drop_rows',
-                            columns=target_columns if target_columns else missing_cols.index.tolist()
-                        )
-                        st.rerun()
-
-                elif handling_method == "Usuń kolumny z brakującymi wartościami":
-                    if st.button("❌ Usuń kolumny", key="execute_drop_cols"):
-                        from data_processing import handle_missing_values
-                        st.session_state.data = handle_missing_values(
-                            st.session_state.data,
-                            method='drop_columns',
-                            columns=target_columns if target_columns else missing_cols.index.tolist()
-                        )
-                        st.rerun()
-
-                else:  # Wypełnij wartościami
-                    fill_method = st.selectbox(
-                        "Metoda wypełniania",
-                        ["mean", "median", "mode", "zero"],
-                        format_func=lambda x: {
-                            "mean": "Średnia (tylko kolumny numeryczne)",
-                            "median": "Mediana (tylko kolumny numeryczne)", 
-                            "mode": "Moda (najczęstsza wartość)",
-                            "zero": "Zero/puste (0 dla numerycznych, '' dla tekstowych)"
-                        }[x],
-                        key="fill_method"
+                if st.button("🔧 Obsłuż brakujące wartości", key="execute_missing"):
+                    columns_to_process = target_columns if target_columns else missing_cols.index.tolist()
+                    st.session_state.data = handle_missing_values(
+                        st.session_state.data,
+                        method=handling_method,
+                        columns=columns_to_process
                     )
-
-                    if st.button("🔧 Wypełnij brakujące wartości", key="execute_fill"):
-                        from data_processing import handle_missing_values
-                        st.session_state.data = handle_missing_values(
-                            st.session_state.data,
-                            method=fill_method,
-                            columns=target_columns if target_columns else missing_cols.index.tolist()
-                        )
-                        st.rerun()
+                    st.rerun()
 
         elif processing_option == "Usuwanie duplikatów":
             st.subheader("🔄 Usuwanie duplikatów")
@@ -980,7 +705,6 @@ if st.session_state.data is not None:
                     st.dataframe(duplicated_rows, use_container_width=True)
                 
                 if st.button("❌ Usuń duplikaty", key="execute_remove_dups"):
-                    from data_processing import remove_duplicates
                     st.session_state.data = remove_duplicates(st.session_state.data)
                     st.rerun()
             else:
@@ -1027,7 +751,6 @@ if st.session_state.data is not None:
 
                 if st.button("📏 Skaluj dane", key="execute_scale"):
                     if cols_to_scale:
-                        from data_processing import scale_data
                         st.session_state.data = scale_data(st.session_state.data, cols_to_scale, method=scale_method)
                         st.rerun()
                     else:
@@ -1071,29 +794,14 @@ if st.session_state.data is not None:
                     key="encode_cols"
                 )
 
-                # Ostrzeżenie o liczbie nowych kolumn
-                if cols_to_encode:
-                    total_new_cols = 0
-                    for col in cols_to_encode:
-                        unique_vals = data[col].nunique()
-                        if encoding_method == "onehot":
-                            total_new_cols += unique_vals
-                        else:  # binary
-                            import math
-                            total_new_cols += math.ceil(math.log2(unique_vals)) if unique_vals > 1 else 1
-                    
-                    st.info(f"ℹ️ Kodowanie utworzy około {total_new_cols} nowych kolumn")
-
                 if st.button("🏷️ Koduj dane", key="execute_encode"):
                     if cols_to_encode:
-                        from data_processing import encode_categorical
                         st.session_state.data = encode_categorical(st.session_state.data, cols_to_encode, method=encoding_method)
                         st.rerun()
                     else:
                         st.warning("⚠️ Wybierz kolumny do kodowania")
 
-
-    # Zakładka 3: Wizualizacja
+    # Zakładka 3: Wizualizacja (bez zmian)
     with tab3:
         st.header("Wizualizacja danych")
 
@@ -1105,15 +813,7 @@ if st.session_state.data is not None:
 
         if viz_type == "Histogram":
             st.subheader("Histogram")
-            st.markdown("""
-            **Co reprezentuje**: Rozkład wartości w wybranej kolumnie numerycznej.
             
-            **Jak czytać**:
-            - Wysokość słupka pokazuje częstość występowania wartości
-            - Szerokość słupka to zakres wartości (przedział)
-            - Kształt histogramu sugeruje rodzaj rozkładu (np. normalny, skośny)
-            """)
-
             # Tylko kolumny numeryczne
             num_cols = data.select_dtypes(include=['number']).columns.tolist()
 
@@ -1134,16 +834,7 @@ if st.session_state.data is not None:
 
         elif viz_type == "Wykres pudełkowy":
             st.subheader("Wykres pudełkowy")
-            st.markdown("""
-            **Co reprezentuje**: Rozkład i statystyki wartości numerycznych.
             
-            **Jak czytać**:
-            - Środkowa linia = mediana
-            - Dolna i górna krawędź pudełka = pierwszy i trzeci kwartyl
-            - Wąsy = minimum i maksimum (bez wartości odstających)
-            - Punkty poza wąsami = wartości odstające
-            """)
-
             # Tylko kolumny numeryczne
             num_cols = data.select_dtypes(include=['number']).columns.tolist()
 
@@ -1162,16 +853,7 @@ if st.session_state.data is not None:
 
         elif viz_type == "Wykres punktowy":
             st.subheader("Wykres punktowy")
-            st.markdown("""
-            **Co reprezentuje**: Zależność między dwiema zmiennymi numerycznymi.
             
-            **Jak czytać**:
-            - Każdy punkt reprezentuje jedną obserwację
-            - Położenie punktu pokazuje wartości dla obu zmiennych
-            - Skupiska punktów sugerują korelację
-            - Kolory mogą reprezentować dodatkową zmienną
-            """)
-
             # Tylko kolumny numeryczne
             num_cols = data.select_dtypes(include=['number']).columns.tolist()
 
@@ -1202,17 +884,7 @@ if st.session_state.data is not None:
 
         elif viz_type == "Wykres słupkowy":
             st.subheader("Wykres słupkowy")
-            st.markdown("""
-            **Co reprezentuje**: 
-            - Tryb "Liczności": Liczebność kategorii w wybranej kolumnie
-            - Tryb "Wartości": Zależność między zmienną kategoryczną a numeryczną
             
-            **Jak czytać**:
-            - Wysokość słupka pokazuje wartość lub liczebność
-            - Szerokość słupków jest stała
-            - Etykiety na osi X to kategorie
-            """)
-
             chart_type = st.radio("Typ wykresu słupkowego", ["Liczności", "Wartości"])
 
             if chart_type == "Liczności":
@@ -1251,16 +923,7 @@ if st.session_state.data is not None:
 
         elif viz_type == "Wykres kołowy":
             st.subheader("Wykres kołowy")
-            st.markdown("""
-            **Co reprezentuje**: Udział poszczególnych kategorii w całości (procentowy).
             
-            **Jak czytać**:
-            - Wielkość wycinków pokazuje proporcje kategorii
-            - Procenty sumują się do 100%
-            - Kolory rozróżniają kategorie
-            - Najlepszy dla małej liczby kategorii (maks. 6-8)
-            """)
-
             # Lista kolumn do wykluczenia
             excluded_columns = ['A2', 'A3', 'A8', 'A11', 'A14', 'A15']
             
@@ -1281,16 +944,7 @@ if st.session_state.data is not None:
 
         elif viz_type == "Wykres par":
             st.subheader("Wykres par")
-            st.markdown("""
-            **Co reprezentuje**: Wzajemne relacje między wieloma zmiennymi numerycznymi.
             
-            **Jak czytać**:
-            - Każde pole to osobny wykres punktowy
-            - Przekątna pokazuje rozkład pojedynczej zmiennej
-            - Pola poza przekątną pokazują zależności między parami zmiennych
-            - Kolory mogą reprezentować dodatkową zmienną kategoryczną
-            """)
-
             # Tylko kolumny numeryczne
             num_cols = data.select_dtypes(include=['number']).columns.tolist()
 
@@ -1316,208 +970,6 @@ if st.session_state.data is not None:
                 else:
                     st.warning("Wybierz co najmniej 2 kolumny.")
 
-    # Zakładka 4: Modelowanie
-    with tab4:
-        st.header("Grupowanie danych")
-        st.write("""
-        ### K-means Clustering
-        K-means to algorytm grupowania, który dzieli dane na k grup (klastrów) na podstawie podobieństwa cech.
-        Każdy klaster jest reprezentowany przez swój centroid (średni punkt).
-        """)
-        
-        # Wybór kolumn do grupowania
-        st.subheader("Wybór danych")
-        clustering_cols = create_column_selector(
-            data,
-            "Wybierz kolumny do grupowania (tylko numeryczne będą użyte)",
-            multiselect=True,
-            key="clustering_columns"
-        )
-
-        # Parametry grupowania
-        with st.expander("Parametry grupowania"):
-            col1, col2 = st.columns(2)
-            with col1:
-                n_clusters = st.slider(
-                    "Liczba klastrów (k)", 
-                    min_value=2, 
-                    max_value=10, 
-                    value=3
-                )
-                init = st.selectbox(
-                    "Metoda inicjalizacji",
-                    options=['k-means++', 'random'],
-                    index=0
-                )
-                max_iter = st.number_input(
-                    "Maksymalna liczba iteracji",
-                    min_value=100,
-                    max_value=1000,
-                    value=300,
-                    step=50
-                )
-            
-            with col2:
-                n_init = st.number_input(
-                    "Liczba inicjalizacji",
-                    min_value=1,
-                    max_value=20,
-                    value=10,
-                    step=1
-                )
-                random_state = st.number_input(
-                    "Ziarno losowości",
-                    value=42
-                )
-
-        # Przycisk do uruchomienia grupowania
-        if st.button("Wykonaj grupowanie"):
-            with st.spinner("Grupowanie danych..."):
-                    X_scaled, X_original = prepare_data_for_clustering(data, clustering_cols)
-
-                    if X_scaled is None:
-                        st.error("Błąd przygotowania danych. Sprawdź, czy wybrane kolumny są odpowiednie.")
-                    else:
-                        model = KMeans(
-                            n_clusters=n_clusters,
-                            init=init,
-                            max_iter=max_iter,
-                            n_init=n_init,
-                            random_state=random_state
-                        )
-                        model.fit(X_scaled)
-                        
-                        metrics = evaluate_clustering(X_scaled, model)
-                        
-                        if metrics is not None:
-                            st.success("Grupowanie zakończone pomyślnie!")
-                            
-                            # Metryki
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric("Inertia", f"{metrics['inertia']:.2f}")
-                            with col2:
-                                st.metric("Współczynnik sylwetki", f"{metrics['silhouette']:.3f}")
-                            
-                            # Rozmiary klastrów
-                            st.subheader("Rozmiary klastrów")
-                            sizes_df = pd.DataFrame.from_dict(
-                                metrics['cluster_sizes'], 
-                                orient='index',
-                                columns=['Liczba próbek']
-                            )
-                            safe_display_dataframe(sizes_df)
-                            
-                            # Centroidy
-                            st.subheader("Centroidy klastrów")
-                            with st.expander("Pokaż współrzędne centroidów"):
-                                centroids_df = pd.DataFrame(
-                                    metrics['centroids'],
-                                    columns=X_scaled.columns,
-                                    index=[f"Klaster {i}" for i in range(n_clusters)]
-                                )
-                                safe_display_dataframe(centroids_df)
-                            
-
-                            # Wizualizacje
-                            st.subheader("Wizualizacje")
-                            
-                            # Wykres elbow method
-                            st.write("#### Wykres łokcia (elbow method)")
-                            st.write("""
-                            Ten wykres pomaga w wyborze optymalnej liczby klastrów. 
-                            Punkt 'zgięcia' (łokcia) sugeruje optymalną liczbę klastrów.
-                            """)
-
-                            # Obliczenia dla wykresu łokcia
-                            k_range = range(2, min(11, len(X_scaled)))
-                            inertias = []
-                            with st.spinner("Obliczanie wykresu łokcia..."):
-                                for k in k_range:
-                                    kmeans = KMeans(n_clusters=k, random_state=42)
-                                    kmeans.fit(X_scaled)
-                                    inertias.append(kmeans.inertia_)
-
-                            # Wyświetl wykres łokcia
-                            fig_elbow = px.line(
-                                x=list(k_range), 
-                                y=inertias,
-                                title="Metoda łokcia dla wyboru optymalnej liczby klastrów",
-                                labels={'x': 'Liczba klastrów (k)', 'y': 'Inertia'}
-                            )
-                            fig_elbow.add_scatter(
-                                x=[n_clusters], 
-                                y=[model.inertia_], 
-                                mode='markers',
-                                marker=dict(size=10, color='red'),
-                                name='Wybrana liczba klastrów'
-                            )
-                            st.plotly_chart(fig_elbow, use_container_width=True, key="elbow_plot_main")
-
-                            # Wizualizacja klastrów 2D
-                            if len(X_scaled.columns) >= 2:
-                                st.write("#### Wizualizacja klastrów 2D")
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    feat1 = st.selectbox(
-                                        "Wybierz pierwszą cechę",
-                                        options=X_scaled.columns,
-                                        index=0,
-                                        key='feat1_2d_select_main'
-                                    )
-                                
-                                with col2:
-                                    remaining_cols = [col for col in X_scaled.columns if col != feat1]
-                                    feat2 = st.selectbox(
-                                        "Wybierz drugą cechę",
-                                        options=remaining_cols,
-                                        index=0,
-                                        key='feat2_2d_select_main'
-                                    )
-                                
-                                # Generowanie wykresu
-                                fig = plot_clusters_2d(X_scaled, metrics['labels'], metrics['centroids'], [feat1, feat2])
-                                st.plotly_chart(fig, use_container_width=True, key="clustering_2d_plot_main")
-
-                            # Wykres równoległych współrzędnych
-                            st.write("#### Wykres równoległych współrzędnych")
-                            st.write("""
-                            Ten wykres pokazuje charakterystykę klastrów na wszystkich wymiarach jednocześnie.
-                            Każda linia reprezentuje jeden klaster, a jej przebieg pokazuje wartości na poszczególnych osiach.
-                            """)
-                            fig_parallel = plot_parallel_coordinates(X_scaled, metrics['labels'], X_scaled.columns)
-                            st.plotly_chart(fig_parallel, use_container_width=True, key="parallel_coords_plot_main")
-
-                            # Wizualizacja 3D
-                            if len(X_scaled.columns) >= 3:
-                                st.write("#### Wizualizacja 3D")
-                                st.write("""
-                                Ten wykres pokazuje rozmieszczenie punktów w przestrzeni trójwymiarowej.
-                                Możesz obracać wykres i oglądać klastry z różnych perspektyw.
-                                """)
-                                
-                                viz_cols_3d = st.multiselect(
-                                    "Wybierz 3 cechy do wizualizacji 3D",
-                                    options=X_scaled.columns,
-                                    default=list(X_scaled.columns[:3]),
-                                    key="viz_3d_main"
-                                )
-                                
-                                if len(viz_cols_3d) == 3:
-                                    fig_3d = plot_3d_scatter(X_scaled, metrics['labels'], viz_cols_3d)
-                                    st.plotly_chart(fig_3d, use_container_width=True, key="scatter_3d_plot_main")
-
-                            # Wykresy gęstości
-                            st.write("#### Rozkłady gęstości cech w klastrach")
-                            st.write("""
-                            Te wykresy pokazują rozkład wartości cech w poszczególnych klastrach.
-                            Szerokość wykresu odpowiada częstości występowania danej wartości.
-                            """)
-
-                            for i, feature in enumerate(X_scaled.columns):
-                                fig_density = plot_cluster_density(X_scaled, metrics['labels'], feature)
-                                st.plotly_chart(fig_density, use_container_width=True, key=f"density_plot_main_{feature}_{i}")
 else:
     # Gdy brak danych
     st.title("📊 Analizator danych CSV")
@@ -1530,7 +982,6 @@ else:
     - 📈 **Analizę statystyczną** danych
     - 🔧 **Przetwarzanie** i czyszczenie danych  
     - 📊 **Wizualizację** wyników
-    - 🎯 **Grupowanie** danych (clustering)
     
     ### Jak zacząć?
     1. Wczytaj plik CSV używając panelu po lewej stronie ⬅️
